@@ -1,0 +1,32 @@
+[package]
+name = "namaz-vakti"
+version = "0.1.0"
+edition = "2021"
+resolver = "2"
+rust-version = "1.82"
+
+[[bin]]
+name = "namaz-vakti"
+harness = false
+
+[profile.release]
+opt-level = "s"
+
+[profile.dev]
+debug = true
+opt-level = "z"
+
+[dependencies]
+log = "0.4"
+esp-idf-svc = "0.52.1"
+embedded-svc = "0.29"
+embedded-hal = "1"
+embedded-graphics = "0.8"
+mipidsi = "0.10"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+toml-cfg = "0.2"
+
+[build-dependencies]
+embuild = "0.33"

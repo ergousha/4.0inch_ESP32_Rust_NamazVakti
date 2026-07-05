@@ -1,0 +1,6 @@
+# Copy this file to `cfg.toml` (same directory) and fill in your real WiFi
+# credentials. `cfg.toml` is gitignored so your password never ends up in the
+# repo; the values are baked into the firmware at compile time via toml-cfg.
+[namaz-vakti]
+wifi_ssid = "YOUR_WIFI_SSID"
+wifi_psk = "YOUR_WIFI_PASSWORD"
