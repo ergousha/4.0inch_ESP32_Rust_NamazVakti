@@ -1,4 +1,4 @@
-# Namaz Vakti — ESP32 Rust Prayer Times Dashboard
+# Vaktu's-Salât — ESP32 Rust Prayer Times Dashboard
 
 A `no_std`-free (std, ESP-IDF-based) Rust firmware for a 4.0" ESP32 TFT board
 that connects to WiFi, syncs the clock over NTP, downloads the month's prayer
@@ -7,9 +7,7 @@ API, and shows a full-screen dashboard: the 5 daily vakits, the currently
 upcoming one highlighted, and a live countdown until it. Tap the touchscreen
 anywhere to toggle the header's date between Miladi (Gregorian) and Hijri.
 
-This project is the Rust sibling of `../4.0inch_ESP32_LVGL` (the board's
-original C/ESP-IDF/LVGL demo) — same board, same display controller, written
-from scratch in Rust instead of porting the C code.
+![Dashboard preview](docs/dashboard-preview.png)
 
 ## Hardware
 
