@@ -194,8 +194,26 @@ fn main() -> anyhow::Result<()> {
     let mut last_fetch_attempt;
     if days_data.is_empty() {
         draw_status(&mut display, &["Namaz vakitleri", "indiriliyor..."])?;
-        days_data = fetch_with_retry(&mut display, 5)?;
-        cache::save(&cache_nvs, &days_data);
+        // A failed initial fetch must not be fatal: with an empty cache there
+        // is nothing to show yet, but the device should stay alive, show a
+        // status screen, and let the main loop's throttled refresh path keep
+        // retrying (DNS/API outages, TLS failures and captive WiFi are all
+        // recoverable without a reboot).
+        match fetch_with_retry(&mut display, 5) {
+            Ok(fresh) => {
+                cache::save(&cache_nvs, &fresh);
+                days_data = fresh;
+            }
+            Err(e) => {
+                log::warn!("Initial prayer-time fetch failed, retrying in background: {e:?}");
+                draw_status(
+                    &mut display,
+                    &["Namaz vakitleri alınamadı", "Arka planda tekrar denenecek..."],
+                )?;
+            }
+        }
+        // Record the attempt in both cases so the main loop waits the throttle
+        // interval before its next try instead of hammering a failed endpoint.
         last_fetch_attempt = now_epoch();
     } else {
         log::info!("Loaded {} cached prayer-time days from NVS", days_data.len());
