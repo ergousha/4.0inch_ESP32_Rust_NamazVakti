@@ -27,6 +27,14 @@ Thank you for your interest in contributing to this project! Here's how to get s
    cargo build
    ```
 
+4. Enable the pre-commit hook (one-time, runs fmt/clippy/test on the fast,
+   host-testable `logic/` crate before each commit — see
+   [`.githooks/pre-commit`](.githooks/pre-commit)):
+   ```bash
+   git config core.hooksPath .githooks
+   ```
+   Skip it for a single commit with `git commit --no-verify` if needed.
+
 ## Code Quality Standards
 
 All contributions must meet these requirements:
@@ -44,9 +52,11 @@ All contributions must meet these requirements:
   ```
 
 ### Testing
-- Write and run tests:
+- The pure, hardware-free logic (calendar math, prayer-time parsing) lives in
+  the `logic/` crate and is unit tested with a plain host toolchain — no ESP32
+  device or `esp` toolchain needed:
   ```bash
-  cargo test --verbose
+  cd logic && cargo test
   ```
 
 ### Documentation

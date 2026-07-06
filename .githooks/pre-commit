@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# Pre-commit checks for namaz-vakti.
+#
+# Deliberately scoped to the pure, host-testable `logic/` crate only — the
+# root `namaz-vakti` firmware crate needs the espup-installed `esp` toolchain
+# and ESP-IDF SDK, and a full build/check there takes minutes, which would
+# make every commit painful. That full build is still verified in CI
+# (esp32-build.yml); this hook mirrors the fast `Rust CI` workflow jobs
+# (check/fmt/clippy/test on logic/) so problems are caught before they ever
+# reach a PR.
+#
+# Enable this hook once per clone with:
+#   git config core.hooksPath .githooks
+#
+# Bypass it for a single commit (e.g. a WIP commit) with:
+#   git commit --no-verify
+
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+cd "$repo_root/logic"
+
+# The parent .cargo/config.toml (repo root) forces the ESP32 firmware's
+# xtensa-esp32-espidf target on every cargo invocation under this repo,
+# including here in logic/. cargo fmt doesn't invoke rustc so it's
+# unaffected, but clippy/test need an explicit --target to build for the
+# host instead (verified in CI — see .github/workflows/rust.yml).
+host_target="$(rustc -vV | sed -n 's/host: //p')"
+
+echo "pre-commit: cargo fmt --check (logic/)"
+cargo fmt --all -- --check
+
+echo "pre-commit: cargo clippy (logic/)"
+cargo clippy --target "$host_target" --all-targets --all-features -- -D warnings
+
+echo "pre-commit: cargo test (logic/)"
+cargo test --target "$host_target" --quiet
+
+echo "pre-commit: all checks passed"
