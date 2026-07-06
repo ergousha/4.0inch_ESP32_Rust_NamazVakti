@@ -34,6 +34,11 @@ jobs:
 
       - name: Install ESP toolchain
         run: espup install
+        env:
+          # espup queries the GitHub API for release info; unauthenticated
+          # requests are rate-limited (60/hr per IP) and can 403 on shared
+          # CI runners. Authenticating raises that to 5000/hr.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
@@ -72,6 +77,11 @@ jobs:
 
       - name: Install ESP toolchain
         run: espup install
+        env:
+          # espup queries the GitHub API for release info; unauthenticated
+          # requests are rate-limited (60/hr per IP) and can 403 on shared
+          # CI runners. Authenticating raises that to 5000/hr.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
