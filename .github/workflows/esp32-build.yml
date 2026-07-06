@@ -32,6 +32,13 @@ jobs:
         env:
           RUSTUP_TOOLCHAIN: stable
 
+      # .cargo/config.toml sets `linker = "ldproxy"` for the espidf target;
+      # ldproxy is a separate esp-rs crate that espup does not install.
+      - name: Install ldproxy
+        run: cargo install ldproxy --locked
+        env:
+          RUSTUP_TOOLCHAIN: stable
+
       - name: Install ESP toolchain
         run: espup install
         env:
@@ -72,6 +79,13 @@ jobs:
         run: |
           cargo install espup --locked
           cargo install cargo-bloat --locked
+        env:
+          RUSTUP_TOOLCHAIN: stable
+
+      # .cargo/config.toml sets `linker = "ldproxy"` for the espidf target;
+      # ldproxy is a separate esp-rs crate that espup does not install.
+      - name: Install ldproxy
+        run: cargo install ldproxy --locked
         env:
           RUSTUP_TOOLCHAIN: stable
 
