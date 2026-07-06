@@ -1,5 +1,14 @@
 name: Rust CI
 
+# This workflow checks the `logic` crate only (`logic/`) — the pure,
+# hardware-free calendar/prayer-time logic split out of the firmware so it
+# can be built, linted, and tested with a normal stable host Rust toolchain,
+# no ESP32 device or `esp` toolchain/ESP-IDF SDK required.
+#
+# The `namaz-vakti` firmware package at the repo root can only be built with
+# the espup-installed `esp` toolchain + ESP-IDF SDK; that's covered by
+# esp32-build.yml instead. See issue #2.
+
 on:
   push:
     branches: [ main, develop ]
@@ -12,7 +21,7 @@ env:
 
 jobs:
   check:
-    name: Cargo check
+    name: Cargo check (logic crate)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -24,12 +33,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: logic
       
       - name: Run cargo check
-        run: cargo check --verbose
+        working-directory: logic
+        run: |
+          cargo check --target "$(rustc -vV | sed -n 's/host: //p')" --verbose
 
   fmt:
-    name: Rustfmt
+    name: Rustfmt (logic crate)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -43,10 +56,11 @@ jobs:
           components: rustfmt
       
       - name: Run cargo fmt
+        working-directory: logic
         run: cargo fmt --all -- --check
 
   clippy:
-    name: Clippy
+    name: Clippy (logic crate)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -60,12 +74,16 @@ jobs:
           components: clippy
       
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: logic
       
       - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        working-directory: logic
+        run: |
+          cargo clippy --target "$(rustc -vV | sed -n 's/host: //p')" --all-targets --all-features -- -D warnings
 
   test:
-    name: Tests
+    name: Tests (logic crate)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -77,12 +95,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: logic
       
       - name: Run tests
-        run: cargo test --verbose
+        working-directory: logic
+        run: |
+          cargo test --target "$(rustc -vV | sed -n 's/host: //p')" --verbose
 
   doc:
-    name: Documentation
+    name: Documentation (logic crate)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -94,14 +116,18 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: logic
       
       - name: Check documentation
-        run: cargo doc --no-deps --document-private-items
+        working-directory: logic
+        run: |
+          cargo doc --target "$(rustc -vV | sed -n 's/host: //p')" --no-deps --document-private-items
         env:
           RUSTDOCFLAGS: -D warnings
 
   build:
-    name: Build
+    name: Build (logic crate)
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -113,6 +139,10 @@ jobs:
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
       
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: logic
       
       - name: Run cargo build
-        run: cargo build --release --verbose
+        working-directory: logic
+        run: |
+          cargo build --release --target "$(rustc -vV | sed -n 's/host: //p')" --verbose
