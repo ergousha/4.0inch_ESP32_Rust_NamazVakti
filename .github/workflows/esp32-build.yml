@@ -99,8 +99,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Check binary size
+      - name: Build for size check
         run: |
           source $HOME/export-esp.sh
           cargo build --release
+
+      # cargo-bloat's ELF parser doesn't reliably support the Xtensa
+      # architecture used by the esp32 target (known upstream limitation),
+      # so this can fail with "symbols section is missing" even though the
+      # build above succeeded. Non-fatal: it's a size-reporting nicety, not
+      # a correctness check.
+      - name: Check binary size
+        continue-on-error: true
+        run: |
+          source $HOME/export-esp.sh
           cargo bloat --release -n 20
