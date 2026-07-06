@@ -7,11 +7,17 @@ This directory contains GitHub-specific configurations for automated workflows a
 ### Workflows (`.github/workflows/`)
 
 #### `rust.yml`
-Main CI pipeline for code quality checks:
-- **Cargo check**: Verify code compiles
+CI pipeline for the `logic` crate (`logic/`) — the pure, hardware-free
+calendar/prayer-time logic split out of the firmware so it can be built,
+linted, and unit tested with a normal stable host Rust toolchain, with no
+ESP32 device or `esp`/ESP-IDF toolchain required (see [issue #2](https://github.com/ergousha/4.0inch_ESP32_Rust_NamazVakti/issues/2)).
+The `namaz-vakti` firmware package at the repo root can only be built with
+the `esp` toolchain + ESP-IDF SDK, so it isn't checked here — see
+`esp32-build.yml` instead.
+- **Cargo check**: Verify the logic crate compiles
 - **Rustfmt**: Enforce code formatting
 - **Clippy**: Linting and best practices
-- **Tests**: Run test suite
+- **Tests**: Run the logic crate's unit test suite
 - **Documentation**: Check doc comments and build docs
 - **Build**: Release build verification
 
@@ -72,12 +78,12 @@ Configure on GitHub via **Settings → Branches → Branch protection rules**:
 1. Require a pull request before merging:
    - ✅ Require approvals (1 minimum)
    - ✅ Require status checks to pass before merging:
-     - `check (Cargo check)`
-     - `fmt (Rustfmt)`
-     - `clippy (Clippy)`
-     - `test (Tests)`
-     - `doc (Documentation)`
-     - `build (Build)`
+     - `Cargo check (logic crate)`
+     - `Rustfmt (logic crate)`
+     - `Clippy (logic crate)`
+     - `Tests (logic crate)`
+     - `Documentation (logic crate)`
+     - `Build (logic crate)`
      - `esp32-build (Build for ESP32)`
      - `security_audit (Security Audit)`
    - ✅ Require branches to be up to date before merging

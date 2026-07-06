@@ -23,17 +23,29 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
+      # RUSTUP_TOOLCHAIN=stable is required here: the repo's rust-toolchain.toml
+      # pins the espup-installed `esp` toolchain repo-wide, but it isn't
+      # installed yet at this point, so any plain `cargo` invocation would
+      # otherwise fail with "custom toolchain 'esp' ... is not installed".
       - name: Install espup
-        run: cargo install espup
+        run: cargo install espup --locked
+        env:
+          RUSTUP_TOOLCHAIN: stable
+
+      # .cargo/config.toml sets `linker = "ldproxy"` for the espidf target;
+      # ldproxy is a separate esp-rs crate that espup does not install.
+      - name: Install ldproxy
+        run: cargo install ldproxy --locked
+        env:
+          RUSTUP_TOOLCHAIN: stable
 
       - name: Install ESP toolchain
         run: espup install
-
-      - name: Setup ESP environment
-        run: |
-          echo "source $HOME/export-esp.sh" >> $GITHUB_ENV
-          source $HOME/export-esp.sh
-          export PATH="$HOME/.cargo/bin:$PATH"
+        env:
+          # espup queries the GitHub API for release info; unauthenticated
+          # requests are rate-limited (60/hr per IP) and can 403 on shared
+          # CI runners. Authenticating raises that to 5000/hr.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
@@ -59,23 +71,46 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
+      # RUSTUP_TOOLCHAIN=stable is required here: the repo's rust-toolchain.toml
+      # pins the espup-installed `esp` toolchain repo-wide, but it isn't
+      # installed yet at this point, so any plain `cargo` invocation would
+      # otherwise fail with "custom toolchain 'esp' ... is not installed".
       - name: Install espup and cargo-bloat
         run: |
-          cargo install espup
-          cargo install cargo-bloat
+          cargo install espup --locked
+          cargo install cargo-bloat --locked
+        env:
+          RUSTUP_TOOLCHAIN: stable
+
+      # .cargo/config.toml sets `linker = "ldproxy"` for the espidf target;
+      # ldproxy is a separate esp-rs crate that espup does not install.
+      - name: Install ldproxy
+        run: cargo install ldproxy --locked
+        env:
+          RUSTUP_TOOLCHAIN: stable
 
       - name: Install ESP toolchain
         run: espup install
-
-      - name: Setup ESP environment
-        run: |
-          source $HOME/export-esp.sh
-          export PATH="$HOME/.cargo/bin:$PATH"
+        env:
+          # espup queries the GitHub API for release info; unauthenticated
+          # requests are rate-limited (60/hr per IP) and can 403 on shared
+          # CI runners. Authenticating raises that to 5000/hr.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
-      - name: Check binary size
+      - name: Build for size check
         run: |
           source $HOME/export-esp.sh
           cargo build --release
+
+      # cargo-bloat's ELF parser doesn't reliably support the Xtensa
+      # architecture used by the esp32 target (known upstream limitation),
+      # so this can fail with "symbols section is missing" even though the
+      # build above succeeded. Non-fatal: it's a size-reporting nicety, not
+      # a correctness check.
+      - name: Check binary size
+        continue-on-error: true
+        run: |
+          source $HOME/export-esp.sh
           cargo bloat --release -n 20

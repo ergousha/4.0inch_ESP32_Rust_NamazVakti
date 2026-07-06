@@ -1,53 +1,18 @@
-//! Fetches and models prayer times from the ezanvakti.emushaf.net API for
-//! Haarlem, Netherlands (Ulke=HOLLANDA id 4, Ilce=HAARLEM id 13877).
+//! Fetches prayer times from the ezanvakti.emushaf.net API for Haarlem,
+//! Netherlands (Ulke=HOLLANDA id 4, Ilce=HAARLEM id 13877).
+//!
+//! The `DayTimes` model and its pure parsing/formatting helpers live in the
+//! `namaz-vakti-logic` crate (see `logic/src/prayer_times.rs`) so they can be
+//! unit tested with a plain host Rust toolchain, with no ESP-IDF/hardware
+//! dependency required. Only the actual HTTPS fetch below needs ESP-IDF.
 
 use embedded_svc::http::{client::Client as HttpClient, Method};
 use esp_idf_svc::http::client::{Configuration as HttpConfig, EspHttpConnection};
-use serde::{Deserialize, Serialize};
 
-use crate::time_utils::parse_hhmm_to_seconds;
+pub use namaz_vakti_logic::prayer_times::DayTimes;
 
 /// Ilce (district) id for Haarlem under Ulke (country) HOLLANDA.
 const ILCE_ID: u32 = 13877;
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DayTimes {
-    #[serde(rename = "MiladiTarihKisa")]
-    pub date: String,
-    /// Hijri date, e.g. "17.1.1448" (day.month.year) — shown when the
-    /// dashboard's date mode is toggled by tapping the screen.
-    #[serde(rename = "HicriTarihKisa")]
-    pub hijri_date: String,
-    #[serde(rename = "Imsak")]
-    pub imsak: String,
-    #[serde(rename = "Ogle")]
-    pub ogle: String,
-    #[serde(rename = "Ikindi")]
-    pub ikindi: String,
-    #[serde(rename = "Aksam")]
-    pub aksam: String,
-    #[serde(rename = "Yatsi")]
-    pub yatsi: String,
-}
-
-/// The 5 daily prayers in order, as (label, "HH:MM") pairs. Sunrise ("Gunes")
-/// is deliberately excluded since it isn't one of the 5 prayers.
-impl DayTimes {
-    pub fn prayers(&self) -> [(&'static str, &str); 5] {
-        [
-            ("İMSAK", &self.imsak),
-            ("ÖĞLE", &self.ogle),
-            ("İKİNDİ", &self.ikindi),
-            ("AKŞAM", &self.aksam),
-            ("YATSI", &self.yatsi),
-        ]
-    }
-
-    pub fn prayer_seconds(&self) -> [(&'static str, u32); 5] {
-        self.prayers()
-            .map(|(name, hhmm)| (name, parse_hhmm_to_seconds(hhmm).unwrap_or(0)))
-    }
-}
 
 /// Downloads the full (~32 day) prayer time table over HTTPS.
 pub fn fetch_month() -> anyhow::Result<Vec<DayTimes>> {

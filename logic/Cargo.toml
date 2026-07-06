@@ -1,0 +1,16 @@
+[package]
+name = "namaz-vakti-logic"
+version = "0.1.0"
+edition = "2021"
+description = "Pure, hardware-free calendar/prayer-time logic for namaz-vakti, kept separate so it can be unit tested with a normal host Rust toolchain (no ESP-IDF/ESP32 toolchain or device required)."
+
+# Marks this as its own workspace root so it gets its own Cargo.lock and is
+# never pulled into the parent ESP32 firmware crate's (implicit) workspace,
+# even though the firmware depends on it via a path dependency.
+[workspace]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"
