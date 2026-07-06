@@ -1,0 +1,81 @@
+name: ESP32 Build
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main, develop ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  esp32-build:
+    name: Build for ESP32
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+
+      - name: Install espup
+        run: cargo install espup
+
+      - name: Install ESP toolchain
+        run: espup install
+
+      - name: Setup ESP environment
+        run: |
+          echo "source $HOME/export-esp.sh" >> $GITHUB_ENV
+          source $HOME/export-esp.sh
+          export PATH="$HOME/.cargo/bin:$PATH"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Build for ESP32
+        run: |
+          source $HOME/export-esp.sh
+          cargo build --release --verbose
+
+      - name: Check with cargo check
+        run: |
+          source $HOME/export-esp.sh
+          cargo check --verbose
+
+  esp32-size:
+    name: Check Binary Size
+    runs-on: macos-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+
+      - name: Install espup and cargo-bloat
+        run: |
+          cargo install espup
+          cargo install cargo-bloat
+
+      - name: Install ESP toolchain
+        run: espup install
+
+      - name: Setup ESP environment
+        run: |
+          source $HOME/export-esp.sh
+          export PATH="$HOME/.cargo/bin:$PATH"
+
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+      - name: Check binary size
+        run: |
+          source $HOME/export-esp.sh
+          cargo build --release
+          cargo bloat --release -n 20

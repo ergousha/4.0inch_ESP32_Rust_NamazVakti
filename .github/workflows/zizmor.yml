@@ -1,0 +1,28 @@
+name: Zizmor Security Checks
+
+on:
+  push:
+    branches: [ main, develop ]
+    paths:
+      - '.github/workflows/**'
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - '.github/workflows/**'
+
+jobs:
+  zizmor:
+    name: Zizmor Security Linter
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install zizmor
+        run: cargo install zizmor
+
+      - name: Run zizmor
+        run: zizmor .github/workflows/
