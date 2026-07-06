@@ -23,8 +23,14 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
+      # RUSTUP_TOOLCHAIN=stable is required here: the repo's rust-toolchain.toml
+      # pins the espup-installed `esp` toolchain repo-wide, but it isn't
+      # installed yet at this point, so any plain `cargo` invocation would
+      # otherwise fail with "custom toolchain 'esp' ... is not installed".
       - name: Install espup
         run: cargo install espup
+        env:
+          RUSTUP_TOOLCHAIN: stable
 
       - name: Install ESP toolchain
         run: espup install
@@ -59,10 +65,16 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
 
+      # RUSTUP_TOOLCHAIN=stable is required here: the repo's rust-toolchain.toml
+      # pins the espup-installed `esp` toolchain repo-wide, but it isn't
+      # installed yet at this point, so any plain `cargo` invocation would
+      # otherwise fail with "custom toolchain 'esp' ... is not installed".
       - name: Install espup and cargo-bloat
         run: |
           cargo install espup
           cargo install cargo-bloat
+        env:
+          RUSTUP_TOOLCHAIN: stable
 
       - name: Install ESP toolchain
         run: espup install
