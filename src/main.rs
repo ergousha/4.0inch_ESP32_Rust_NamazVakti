@@ -3,6 +3,7 @@ mod prayer;
 mod segdisplay;
 mod time_utils;
 mod touch;
+mod touch_calibration;
 
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -162,6 +163,37 @@ fn main() -> anyhow::Result<()> {
     display
         .clear(col_bg())
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    draw_status(&mut display, &["Namaz Vakti", "Başlatılıyor..."])?;
+
+    // --- Touchscreen calibration ---
+    // Runs before WiFi so the panel's raw X/Y → screen mapping is ready for any
+    // future touch-driven UI. A saved calibration in NVS is reused as-is;
+    // holding the screen through this splash for 5s forces a re-calibration
+    // (the only trigger for now — no settings-menu entry point yet).
+    let touch_cal_nvs = touch_calibration::open(nvs.clone())?;
+    let force_recalibrate = touch_calibration::recalibration_requested(&mut display, &mut touch);
+    if force_recalibrate {
+        log::info!("Re-calibration gesture detected; clearing saved touch calibration");
+        touch_calibration::clear(&touch_cal_nvs);
+    }
+    let calibration = match touch_calibration::load(&touch_cal_nvs) {
+        Some(cal) if !force_recalibrate => {
+            log::info!("Loaded saved touch calibration: {cal:?}");
+            cal
+        }
+        _ => {
+            let outcome = touch_calibration::run_wizard(&mut display, &mut touch, 480, 320);
+            if outcome.should_persist() {
+                touch_calibration::save(&touch_cal_nvs, &outcome.calibration());
+            }
+            outcome.calibration()
+        }
+    };
+    // Consumers (WiFi-setup keyboard, settings screens) will call
+    // `calibration.to_screen(x_raw, y_raw)`; this issue only establishes the
+    // mapping and leaves the existing tap-to-toggle-date-mode gesture as-is.
+    log::info!("Touch calibration ready: {calibration:?}");
+    // The wizard/gesture painted over the splash; restore it before WiFi.
     draw_status(&mut display, &["Namaz Vakti", "Başlatılıyor..."])?;
 
     // --- WiFi ---

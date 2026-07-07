@@ -10,3 +10,4 @@
 
 pub mod prayer_times;
 pub mod time_utils;
+pub mod touch_calibration;

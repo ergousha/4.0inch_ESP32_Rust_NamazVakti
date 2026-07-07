@@ -1,11 +1,22 @@
-//! Minimal XPT2046 resistive touch driver — pressure-only, no coordinate
-//! reading. This project only needs "was the screen tapped?" to toggle the
-//! header's date mode, not X/Y position.
+//! Minimal XPT2046 resistive touch driver.
+//!
+//! Reads the Z1/Z2 pressure channels for "is the screen being touched?" (used
+//! by the main loop's tap-to-toggle-date-mode gesture) and the X/Y position
+//! channels for raw coordinates (used by the touch-calibration wizard and,
+//! once calibrated, future touch-driven UI — see `touch_calibration`).
 
 use embedded_hal::spi::SpiDevice;
 
 const CMD_READ_Z1: u8 = 0xB0;
 const CMD_READ_Z2: u8 = 0xC0;
+const CMD_READ_X: u8 = 0xD0;
+const CMD_READ_Y: u8 = 0x90;
+
+/// Raw position samples taken per [`Xpt2046::sample_position`] call. The first
+/// [`DISCARD_SAMPLES`] are thrown away (resistive panels are noisy for the
+/// first moment after contact); the rest are averaged.
+const POSITION_SAMPLES: usize = 8;
+const DISCARD_SAMPLES: usize = 2;
 
 /// Empirical pressure threshold. `z1 + (4095 - z2)` reads near 0 when
 /// untouched (Z1 low, Z2 near max with the resistive layers not in contact)
@@ -43,5 +54,45 @@ where
         let z1 = self.read_channel(CMD_READ_Z1)? as i32;
         let z2 = self.read_channel(CMD_READ_Z2)? as i32;
         Ok(z1 + (4095 - z2) > PRESSURE_THRESHOLD)
+    }
+
+    /// Reads a single raw 12-bit `(x, y)` ADC pair. The values are only
+    /// meaningful while the panel is actually being pressed — callers that need
+    /// a trustworthy coordinate should use [`Self::sample_position`] instead.
+    pub fn read_position(&mut self) -> Result<(u16, u16), SPI::Error> {
+        let x = self.read_channel(CMD_READ_X)?;
+        let y = self.read_channel(CMD_READ_Y)?;
+        Ok((x, y))
+    }
+
+    /// Returns `Some((x_raw, y_raw))` — an average of several raw readings taken
+    /// while the panel stays under pressure — or `None` if it isn't currently
+    /// touched (or is released mid-sample). The first [`DISCARD_SAMPLES`]
+    /// readings are discarded before averaging to shed the initial-contact
+    /// noise typical of resistive panels.
+    pub fn sample_position(&mut self) -> Result<Option<(u16, u16)>, SPI::Error> {
+        if !self.is_touched()? {
+            return Ok(None);
+        }
+        let mut sum_x: u32 = 0;
+        let mut sum_y: u32 = 0;
+        let mut kept: u32 = 0;
+        for i in 0..POSITION_SAMPLES {
+            // Bail if the touch is released partway through: a partial average
+            // straddling the release is worse than reporting "no touch".
+            if !self.is_touched()? {
+                return Ok(None);
+            }
+            let (x, y) = self.read_position()?;
+            if i >= DISCARD_SAMPLES {
+                sum_x += x as u32;
+                sum_y += y as u32;
+                kept += 1;
+            }
+        }
+        if kept == 0 {
+            return Ok(None);
+        }
+        Ok(Some(((sum_x / kept) as u16, (sum_y / kept) as u16)))
     }
 }

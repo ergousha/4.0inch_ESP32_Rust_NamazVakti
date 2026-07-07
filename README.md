@@ -21,9 +21,11 @@ E32N40T). Product page / vendor wiki with schematics and datasheets:
   320×480 px physically (portrait), RGB565 color, BGR subpixel order.
   This firmware rotates it 90° in software to a 480×320 landscape canvas.
 - **Touch controller**: XPT2046 (resistive), shares the same SPI2 bus as the
-  display with its own CS line. Used only for tap detection (pressure-based,
-  no coordinates) to toggle the header's date mode — see
-  [`src/touch.rs`](src/touch.rs).
+  display with its own CS line. Reads both pressure (for tap detection — e.g.
+  toggling the header's date mode) and raw X/Y coordinates (fed through a
+  per-unit affine calibration for touch-driven UI) — see
+  [`src/touch.rs`](src/touch.rs) and
+  [`src/touch_calibration.rs`](src/touch_calibration.rs).
 
 None of this pinout is silkscreened or in the vendor wiki's text; it was
 reverse-engineered from the sibling C project's `sdkconfig`
@@ -42,13 +44,19 @@ you ever target a different board revision.
 | Touch (XPT2046) MOSI/CLK | 13/14| same lines as the display |
 | Touch (XPT2046) CS       | 33   | |
 | Touch (XPT2046) IRQ      | 36   | not wired up in software — this firmware polls pressure over SPI instead |
-| Touch X calibration      | —    | raw ADC range ~110–1971, X inverted (unused — see below) |
-| Touch Y calibration      | —    | raw ADC range ~88–1929, Y inverted (unused — see below) |
+| Touch X calibration      | —    | vendor-default raw ADC range ~110–1971, X inverted (fallback only — see below) |
+| Touch Y calibration      | —    | vendor-default raw ADC range ~88–1929, Y inverted (fallback only — see below) |
 
-The X/Y calibration values above are documented for whenever this gets
-extended to real touch coordinates; the current firmware only reads the
-Z1/Z2 pressure channels to detect "is the screen being tapped", which needs
-no calibration. The C driver uses pressure-based touch detection too
+The X/Y ranges above are reverse-engineered vendor defaults, used **only** as
+an emergency fallback (`vendor_default` in
+[`logic/src/touch_calibration.rs`](logic/src/touch_calibration.rs)) when the
+calibration wizard can't complete. Real coordinates come from a per-unit
+5-point affine calibration run on first boot and stored in NVS — resistive
+panels vary too much unit-to-unit to rely on fixed constants. See
+[Touch calibration](#touch-calibration) below.
+
+Tap detection still reads the Z1/Z2 pressure channels (no calibration
+needed). The C driver uses pressure-based detection too
 (`CONFIG_LV_TOUCH_DETECT_PRESSURE=y`, not the IRQ pin) — this firmware
 follows that same proven approach rather than relying on GPIO36 alone,
 since GPIO34-39 on the ESP32 have no internal pull resistors.
@@ -73,6 +81,46 @@ since GPIO34-39 on the ESP32 have no internal pull resistors.
   popular PJRC/Adafruit `XPT2046_Touchscreen` Arduino driver uses
   (`z1 + (4095 - z2)`), not calibrated against this specific panel. If taps
   are missed or trigger spuriously, that constant is the first thing to tune.
+
+## Touch calibration
+
+Resistive panels vary too much unit-to-unit (and by how the glass is mounted)
+to trust fixed ADC constants, so the raw XPT2046 readings are mapped to logical
+(post-rotation, 480×320) screen coordinates through a per-unit **affine
+transform** derived by an on-screen wizard:
+
+```text
+x_screen = a·x_raw + b·y_raw + c
+y_screen = d·x_raw + e·y_raw + f
+```
+
+- **First-boot wizard**: runs right after display+touch init, *before* WiFi. It
+  draws 5 crosshair targets — 4 corners inset ~12% from the edges (panels are
+  least linear right at the border) plus the center — and captures a stable
+  averaged tap at each (touch-down → sample → release, so a single long press
+  can't skip a point).
+- **Solve + verify**: the 4 corners over-determine the 6 coefficients (8
+  equations, 6 unknowns), solved by least squares — more noise-robust than an
+  exact 3-point solve. The center tap is *verification only*: if the solved
+  transform predicts it more than ~15px off, the wizard restarts.
+- **Persistence**: on success the 6 coefficients are stored as a JSON blob in
+  the `touch`/`calib` NVS namespace (same pattern as the prayer-time cache) and
+  reused on every later boot, so the wizard only runs once.
+- **Re-calibration**: **hold the screen for 5 seconds during the boot splash**
+  to clear the saved calibration and re-run the wizard. This is the only
+  trigger for now — there's intentionally no settings-menu entry point yet
+  (deferred until a settings screen exists).
+- **Fallbacks** (never hang): if a target gets no tap within 30s, or
+  verification fails 3 full passes in a row, the firmware falls back to the
+  documented vendor-default ADC constants (see the pinout table) with a warning
+  and keeps running. The fallback is *not* persisted, so the next boot retries
+  the wizard.
+
+The affine solve is pure math with no hardware dependency, so it's unit tested
+on a normal host toolchain in the `logic` crate (`solve_affine` in
+[`logic/src/touch_calibration.rs`](logic/src/touch_calibration.rs)); the
+device-facing wizard/NVS/gesture code is in
+[`src/touch_calibration.rs`](src/touch_calibration.rs).
 
 ## External services
 
@@ -131,11 +179,17 @@ src/
 ├── main.rs        WiFi/SNTP/display/touch/backlight bring-up, main loop, all drawing code
 ├── prayer.rs       HTTPS fetch + JSON model for the ezanvakti API
 ├── cache.rs        NVS load/save for the fetched prayer-time month
-├── touch.rs        Minimal XPT2046 pressure-only touch driver
+├── touch.rs        XPT2046 touch driver (pressure + raw X/Y coordinates)
+├── touch_calibration.rs  NVS persistence + 5-point calibration wizard + gesture
 ├── time_utils.rs   Calendar math + Europe/Amsterdam DST offset (no libc)
 └── segdisplay.rs    Seven-segment-style big digit renderer (embedded-graphics
                       primitives), used for the countdown clock
 ```
+
+The pure affine solve/apply math (`Calibration`, least-squares `solve_affine`,
+`vendor_default`) lives in the host-testable `logic` crate
+([`logic/src/touch_calibration.rs`](logic/src/touch_calibration.rs)); the
+`src/` module above is the hardware-facing half (NVS + on-screen wizard).
 
 - **Rendering**: the panel is only repainted where something actually
   changed, not full-screen every tick — an earlier full `clear()` +
@@ -172,6 +226,8 @@ src/
   (basic debounce), and toggles `DateMode` once per physical tap (tracked
   with a "already toggled this press" flag so holding a finger down
   doesn't rapid-fire).
+- **Touch calibration**: see [Touch calibration](#touch-calibration) for the
+  first-boot wizard, the raw→screen affine mapping, and re-calibration.
 - **NVS caching of prayer data**: the fetched month is JSON-serialized into
   the `namaz`/`days` NVS blob (see [`src/cache.rs`](src/cache.rs)) every time
   a fetch succeeds. At boot, the cache is tried *before* any network
@@ -291,9 +347,12 @@ It should then show up in WSL as `/dev/ttyUSB0`.
 
 ## Possible future work
 
-- Real touch coordinates (X/Y, using the calibration values in the pinout
-  table) for e.g. a settings screen to pick a different city without
-  recompiling, instead of the current single "tap anywhere" gesture.
+- Touch-driven UI now that real X/Y coordinates exist (see
+  [Touch calibration](#touch-calibration)): a WiFi-setup keyboard, or a
+  settings screen to pick a different city without recompiling, instead of the
+  current single "tap anywhere" gesture. A settings-menu entry point to
+  discover/trigger re-calibration also still needs to exist (the gesture works,
+  but nothing surfaces it).
 - Actual backlight dimming control (a schedule, an ambient light sensor, or
   just a manually-set day/night level) — the PWM plumbing is already there,
   it's just fixed at `BACKLIGHT_DUTY_PERCENT`.
