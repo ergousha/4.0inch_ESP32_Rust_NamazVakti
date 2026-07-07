@@ -203,11 +203,26 @@ The pure affine solve/apply math (`Calibration`, least-squares `solve_affine`,
     label, the big countdown and the progress bar. Runs once a **minute**
     (the dashboard only shows minute resolution) and clears only its own
     small bounding box before redrawing, instead of the whole screen.
-- **Fonts**: uses embedded-graphics' `mono_font::iso_8859_9` (Latin-5) fonts,
-  not the default `ascii` set — `ascii` only covers 0x20-0x7E and can't
-  render Turkish letters (İ, ı, Ş, ş, Ğ, ğ, Ö, ö, Ü, ü, Ç, ç) at all. Vakit
-  names, weekday names and status messages use real Turkish spelling
-  (İMSAK, ÖĞLE, İKİNDİ, AKŞAM, YATSI, PAZARTESİ, ÇARŞAMBA, PERŞEMBE, ...).
+- **Fonts & localization**: the UI renders in one of three languages — Türkçe,
+  English or العربية (Arabic) — chosen from the settings screen and persisted
+  to NVS (namespace `settings`, keys `lang`/`datemode` as single bytes; see
+  [`src/settings.rs`](src/settings.rs)). The `Language` enum and every
+  translation table live in the host-testable
+  [`namaz-vakti-logic`](logic/src/language.rs) crate.
+  - **Latin (Türkçe/English)**: embedded-graphics' `mono_font::iso_8859_9`
+    (Latin-5) fonts, not the default `ascii` set — `ascii` only covers
+    0x20-0x7E and can't render Turkish letters (İ, ı, Ş, ş, Ğ, ğ, Ö, ö, Ü, ü,
+    Ç, ç) at all.
+  - **Arabic**: embedded-graphics mono fonts have no Arabic glyphs and do no
+    contextual joining or RTL layout, so Arabic goes through a two-step path:
+    the fixed label set is shaped by a small pure-Rust shaper
+    ([`logic/src/arabic.rs`](logic/src/arabic.rs) — contextual
+    isolated/initial/medial/final forms + lam-alef ligature, then reversed to
+    visual right-to-left order) and drawn with the `u8g2-fonts` renderer's
+    `unifont_t_arabic` / `10x20_t_arabic` faces, which cover the Arabic
+    Presentation Forms-B block. Numeric fields (clock, date) stay in the mono
+    font so digits aren't reversed. See [`src/text.rs`](src/text.rs) for the
+    script-switching draw helper.
 - **Resilience**: if WiFi fails to connect at boot, the device restarts
   itself after showing an error. If the prayer-time fetch fails, it retries
   a few times with a status screen, then keeps retrying in the background
@@ -221,11 +236,13 @@ The pure affine solve/apply math (`Calibration`, least-squares `solve_affine`,
   (`SpiDriver` wrapped in an `Rc`, since `esp-idf-hal`'s `SpiDeviceDriver`
   only needs to *borrow* the bus — each device gets its own hardware CS
   pin and clock speed: 80MHz write-only for the display, 2MHz full-duplex
-  for the touch ADC). The main loop polls `Xpt2046::is_touched()` every
-  ~120ms; a press is only registered after 2 consecutive positive reads
-  (basic debounce), and toggles `DateMode` once per physical tap (tracked
-  with a "already toggled this press" flag so holding a finger down
-  doesn't rapid-fire).
+  for the touch ADC). On the dashboard, touch is used solely to hit-test a
+  gear icon in the top-right of the header (a ~32×32 tap square): tapping it
+  opens the settings screen, where the language and header date mode
+  (Miladi/Hijri) are selected and immediately persisted. Tapping anywhere
+  else on the dashboard does nothing. A raw touch is mapped to a screen pixel
+  with the calibrated affine transform (`Calibration::to_screen`) before
+  hit-testing.
 - **Touch calibration**: see [Touch calibration](#touch-calibration) for the
   first-boot wizard, the raw→screen affine mapping, and re-calibration.
 - **NVS caching of prayer data**: the fetched month is JSON-serialized into

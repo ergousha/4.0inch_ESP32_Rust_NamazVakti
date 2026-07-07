@@ -11,10 +11,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant};
 
 use embedded_graphics::{
-    mono_font::{
-        iso_8859_9::{FONT_9X15, FONT_10X20},
-        MonoTextStyle,
-    },
+    mono_font::{iso_8859_9::FONT_9X15, MonoTextStyle},
     prelude::*,
     primitives::{Circle, Line, PrimitiveStyle},
     text::{Alignment, Text},
@@ -24,6 +21,8 @@ use esp_idf_svc::nvs::{EspDefaultNvsPartition, EspNvs, NvsDefault};
 
 use crate::touch::Xpt2046;
 use crate::Rgb565;
+
+use namaz_vakti_logic::language::{self, Language, Msg};
 
 pub use namaz_vakti_logic::touch_calibration::Calibration;
 use namaz_vakti_logic::touch_calibration::{solve_affine, vendor_default, CalPoint};
@@ -112,7 +111,11 @@ pub fn clear(nvs: &EspNvs<NvsDefault>) {
 /// gesture. Returns `true` only if the panel is held continuously for
 /// [`RECAL_HOLD_SECS`]. Returns immediately (no delay) on a normal boot where
 /// the screen isn't being touched as this is called.
-pub fn recalibration_requested<D, SPI>(display: &mut D, touch: &mut Xpt2046<SPI>) -> bool
+pub fn recalibration_requested<D, SPI>(
+    display: &mut D,
+    touch: &mut Xpt2046<SPI>,
+    lang: Language,
+) -> bool
 where
     D: DrawTarget<Color = Rgb565>,
     SPI: SpiDevice,
@@ -132,8 +135,12 @@ where
         let remaining = hold.saturating_sub(start.elapsed()).as_secs() + 1;
         if remaining != shown {
             shown = remaining;
-            let msg = format!("Keep holding... {remaining}");
-            let _ = crate::draw_status(display, &["Recalibrating touch", msg.as_str()]);
+            let msg = format!("{remaining}");
+            let _ = crate::draw_status(
+                display,
+                &[language::text(lang, Msg::CalRecalibrating), msg.as_str()],
+                lang,
+            );
         }
         sleep(Duration::from_millis(50));
     }
@@ -147,6 +154,7 @@ pub fn run_wizard<D, SPI>(
     touch: &mut Xpt2046<SPI>,
     width: u16,
     height: u16,
+    lang: Language,
 ) -> CalibrationOutcome
 where
     D: DrawTarget<Color = Rgb565>,
@@ -167,7 +175,7 @@ where
         let mut raws = [(0u16, 0u16); 4];
         let mut timed_out = false;
         for (i, corner) in corners.iter().enumerate() {
-            match capture_point(display, touch, *corner, i + 1, width, height) {
+            match capture_point(display, touch, *corner, i + 1, width, height, lang) {
                 Some(raw) => raws[i] = raw,
                 None => {
                     timed_out = true;
@@ -182,7 +190,7 @@ where
         }
 
         // Capture the center as an independent verification tap.
-        let Some(center_raw) = capture_point(display, touch, center, 5, width, height) else {
+        let Some(center_raw) = capture_point(display, touch, center, 5, width, height, lang) else {
             break;
         };
 
@@ -198,8 +206,17 @@ where
             .collect();
 
         let Some(cal) = solve_affine(&points) else {
-            log::warn!("Calibration solve failed (degenerate taps), attempt {attempt}/{MAX_ATTEMPTS}");
-            let _ = crate::draw_status(display, &["Calibration failed", "Please retry"]);
+            log::warn!(
+                "Calibration solve failed (degenerate taps), attempt {attempt}/{MAX_ATTEMPTS}"
+            );
+            let _ = crate::draw_status(
+                display,
+                &[
+                    language::text(lang, Msg::CalFailed),
+                    language::text(lang, Msg::CalRetry),
+                ],
+                lang,
+            );
             sleep(Duration::from_secs(2));
             continue;
         };
@@ -208,7 +225,7 @@ where
         let err = ((px - center.x as f64).powi(2) + (py - center.y as f64).powi(2)).sqrt();
         if err <= VERIFY_TOLERANCE_PX {
             log::info!("Touch calibration verified (center error {err:.1}px): {cal:?}");
-            let _ = crate::draw_status(display, &["Calibration complete"]);
+            let _ = crate::draw_status(display, &[language::text(lang, Msg::CalComplete)], lang);
             sleep(Duration::from_millis(800));
             return CalibrationOutcome::Calibrated(cal);
         }
@@ -216,12 +233,26 @@ where
         log::warn!(
             "Calibration verify failed (center error {err:.1}px > {VERIFY_TOLERANCE_PX}px), attempt {attempt}/{MAX_ATTEMPTS}"
         );
-        let _ = crate::draw_status(display, &["Calibration failed", "Please retry"]);
+        let _ = crate::draw_status(
+            display,
+            &[
+                language::text(lang, Msg::CalFailed),
+                language::text(lang, Msg::CalRetry),
+            ],
+            lang,
+        );
         sleep(Duration::from_secs(2));
     }
 
     log::warn!("Touch calibration falling back to vendor defaults (not persisted)");
-    let _ = crate::draw_status(display, &["Calibration skipped", "Using default values"]);
+    let _ = crate::draw_status(
+        display,
+        &[
+            language::text(lang, Msg::CalSkipped),
+            language::text(lang, Msg::CalUsingDefaults),
+        ],
+        lang,
+    );
     sleep(Duration::from_secs(2));
     CalibrationOutcome::FellBack(vendor_default(width, height))
 }
@@ -235,12 +266,13 @@ fn capture_point<D, SPI>(
     step: usize,
     width: u16,
     height: u16,
+    lang: Language,
 ) -> Option<(u16, u16)>
 where
     D: DrawTarget<Color = Rgb565>,
     SPI: SpiDevice,
 {
-    draw_target(display, target, step, width, height);
+    draw_target(display, target, step, width, height, lang);
 
     // Touch-down: wait for a stable averaged sample under continuous pressure.
     let deadline = Instant::now() + POINT_TIMEOUT;
@@ -274,8 +306,14 @@ where
 /// Clears the screen and draws the target crosshair plus instructions. The
 /// instruction block is placed in the half of the screen opposite the target so
 /// text never sits on top of the crosshair.
-fn draw_target<D>(display: &mut D, target: Point, step: usize, width: u16, height: u16)
-where
+fn draw_target<D>(
+    display: &mut D,
+    target: Point,
+    step: usize,
+    width: u16,
+    height: u16,
+    lang: Language,
+) where
     D: DrawTarget<Color = Rgb565>,
 {
     let _ = display.clear(crate::col_bg());
@@ -287,14 +325,18 @@ where
     };
     let cx = width as i32 / 2;
 
-    let _ = Text::with_alignment(
-        "Touch Calibration",
+    let _ = crate::text::draw_line(
+        display,
+        language::text(lang, Msg::CalTitle),
         Point::new(cx, text_y - 20),
-        MonoTextStyle::new(&FONT_10X20, crate::col_text()),
-        Alignment::Center,
-    )
-    .draw(display);
-    let step_line = format!("Point {step} of 5");
+        crate::text::HAlign::Center,
+        crate::col_text(),
+        lang,
+        crate::text::Size::Medium,
+    );
+    // Step counter stays numeric (drawn in the mono font) so it reads correctly
+    // regardless of script direction.
+    let step_line = format!("{step} / 5");
     let _ = Text::with_alignment(
         &step_line,
         Point::new(cx, text_y + 6),
@@ -302,13 +344,15 @@ where
         Alignment::Center,
     )
     .draw(display);
-    let _ = Text::with_alignment(
-        "Tap the crosshair with a stylus",
+    let _ = crate::text::draw_line(
+        display,
+        language::text(lang, Msg::CalTapCrosshair),
         Point::new(cx, text_y + 30),
-        MonoTextStyle::new(&FONT_9X15, crate::col_dim()),
-        Alignment::Center,
-    )
-    .draw(display);
+        crate::text::HAlign::Center,
+        crate::col_dim(),
+        lang,
+        crate::text::Size::Small,
+    );
 
     draw_crosshair(display, target, crate::col_accent());
 }
