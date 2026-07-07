@@ -8,6 +8,8 @@
 //! depends on this crate via a path dependency and re-exports the bits it
 //! needs from `src/time_utils.rs` and `src/prayer.rs`.
 
+pub mod arabic;
+pub mod language;
 pub mod prayer_times;
 pub mod time_utils;
 pub mod touch_calibration;

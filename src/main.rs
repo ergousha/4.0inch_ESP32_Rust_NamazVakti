@@ -1,6 +1,9 @@
 mod cache;
 mod prayer;
 mod segdisplay;
+mod settings;
+mod settings_screen;
+mod text;
 mod time_utils;
 mod touch;
 mod touch_calibration;
@@ -10,7 +13,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use embedded_graphics::{
     mono_font::{
-        iso_8859_9::{FONT_10X20, FONT_7X13_BOLD, FONT_9X15, FONT_9X18_BOLD},
+        iso_8859_9::{FONT_9X15, FONT_9X18_BOLD},
         MonoTextStyle,
     },
     prelude::*,
@@ -38,6 +41,8 @@ use mipidsi::{
     Builder,
 };
 
+use namaz_vakti_logic::language::{self, Language, Msg};
+
 use prayer::DayTimes;
 use time_utils::LocalTime;
 use touch::Xpt2046;
@@ -54,19 +59,26 @@ pub struct Config {
     wifi_psk: &'static str,
 }
 
-/// Which calendar the header's date is shown in; toggled by tapping the
-/// touchscreen anywhere.
-#[derive(Clone, Copy, PartialEq, Eq)]
+/// Which calendar the header's date is shown in. Chosen from the settings
+/// screen and persisted to NVS; the discriminant doubles as the stored byte.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum DateMode {
     Miladi,
     Hijri,
 }
 
 impl DateMode {
-    fn toggled(self) -> Self {
+    fn to_u8(self) -> u8 {
         match self {
-            DateMode::Miladi => DateMode::Hijri,
-            DateMode::Hijri => DateMode::Miladi,
+            DateMode::Miladi => 0,
+            DateMode::Hijri => 1,
+        }
+    }
+
+    fn from_u8(value: u8) -> Self {
+        match value {
+            1 => DateMode::Hijri,
+            _ => DateMode::Miladi,
         }
     }
 }
@@ -100,12 +112,23 @@ fn main() -> anyhow::Result<()> {
     let sys_loop = EspSystemEventLoop::take()?;
     let nvs = EspDefaultNvsPartition::take()?;
 
+    // --- Persisted UI settings (language + header date mode) ---
+    // Loaded before the first splash so every status message renders in the
+    // saved language; defaults to Türkçe / Miladi on a fresh device.
+    let settings_nvs = settings::open(nvs.clone())?;
+    let mut settings = settings::load(&settings_nvs);
+    log::info!("Loaded settings: {settings:?}");
+
     // --- Backlight (PWM via LEDC, GPIO27) ---
     let ledc_timer = LedcTimerDriver::new(
         peripherals.ledc.timer0,
         &LedcTimerConfig::new().frequency(5.kHz().into()),
     )?;
-    let mut backlight = LedcDriver::new(peripherals.ledc.channel0, ledc_timer, peripherals.pins.gpio27)?;
+    let mut backlight = LedcDriver::new(
+        peripherals.ledc.channel0,
+        ledc_timer,
+        peripherals.pins.gpio27,
+    )?;
     backlight.set_duty(backlight.get_max_duty() * BACKLIGHT_DUTY_PERCENT / 100)?;
 
     // --- Display + touch (ST7796S + XPT2046, sharing SPI2/HSPI; pin map
@@ -163,7 +186,14 @@ fn main() -> anyhow::Result<()> {
     display
         .clear(col_bg())
         .map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    draw_status(&mut display, &["Namaz Vakti", "Başlatılıyor..."])?;
+    draw_status(
+        &mut display,
+        &[
+            language::text(settings.language, Msg::AppTitle),
+            language::text(settings.language, Msg::Starting),
+        ],
+        settings.language,
+    )?;
 
     // --- Touchscreen calibration ---
     // Runs before WiFi so the panel's raw X/Y → screen mapping is ready for any
@@ -171,7 +201,8 @@ fn main() -> anyhow::Result<()> {
     // holding the screen through this splash for 5s forces a re-calibration
     // (the only trigger for now — no settings-menu entry point yet).
     let touch_cal_nvs = touch_calibration::open(nvs.clone())?;
-    let force_recalibrate = touch_calibration::recalibration_requested(&mut display, &mut touch);
+    let force_recalibrate =
+        touch_calibration::recalibration_requested(&mut display, &mut touch, settings.language);
     if force_recalibrate {
         log::info!("Re-calibration gesture detected; clearing saved touch calibration");
         touch_calibration::clear(&touch_cal_nvs);
@@ -182,28 +213,55 @@ fn main() -> anyhow::Result<()> {
             cal
         }
         _ => {
-            let outcome = touch_calibration::run_wizard(&mut display, &mut touch, 480, 320);
+            let outcome = touch_calibration::run_wizard(
+                &mut display,
+                &mut touch,
+                480,
+                320,
+                settings.language,
+            );
             if outcome.should_persist() {
                 touch_calibration::save(&touch_cal_nvs, &outcome.calibration());
             }
             outcome.calibration()
         }
     };
-    // Consumers (WiFi-setup keyboard, settings screens) will call
-    // `calibration.to_screen(x_raw, y_raw)`; this issue only establishes the
-    // mapping and leaves the existing tap-to-toggle-date-mode gesture as-is.
+    // The dashboard's main loop maps raw touches with
+    // `calibration.to_screen(x_raw, y_raw)` to hit-test the header gear icon,
+    // which opens the settings screen.
     log::info!("Touch calibration ready: {calibration:?}");
     // The wizard/gesture painted over the splash; restore it before WiFi.
-    draw_status(&mut display, &["Namaz Vakti", "Başlatılıyor..."])?;
+    draw_status(
+        &mut display,
+        &[
+            language::text(settings.language, Msg::AppTitle),
+            language::text(settings.language, Msg::Starting),
+        ],
+        settings.language,
+    )?;
 
     // --- WiFi ---
-    draw_status(&mut display, &["WiFi'ye bağlanılıyor...", CONFIG.wifi_ssid])?;
+    draw_status(
+        &mut display,
+        &[
+            language::text(settings.language, Msg::WifiConnecting),
+            CONFIG.wifi_ssid,
+        ],
+        settings.language,
+    )?;
     let mut wifi = BlockingWifi::wrap(
         EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs.clone()))?,
         sys_loop,
     )?;
     if let Err(e) = connect_wifi(&mut wifi) {
-        draw_status(&mut display, &["WiFi bağlantısı başarısız", "Yeniden başlatılıyor..."])?;
+        draw_status(
+            &mut display,
+            &[
+                language::text(settings.language, Msg::WifiConnectFailed),
+                language::text(settings.language, Msg::Restarting),
+            ],
+            settings.language,
+        )?;
         log::error!("WiFi connect failed: {e:?}");
         std::thread::sleep(Duration::from_secs(5));
         esp_idf_svc::hal::reset::restart();
@@ -211,7 +269,11 @@ fn main() -> anyhow::Result<()> {
     log::info!("WiFi connected");
 
     // --- Time sync (NTP) ---
-    draw_status(&mut display, &["Saat senkronize ediliyor..."])?;
+    draw_status(
+        &mut display,
+        &[language::text(settings.language, Msg::TimeSyncing)],
+        settings.language,
+    )?;
     let sntp = EspSntp::new_default()?;
     let sync_deadline = SystemTime::now() + Duration::from_secs(20);
     while sntp.get_sync_status() != SyncStatus::Completed && SystemTime::now() < sync_deadline {
@@ -225,13 +287,17 @@ fn main() -> anyhow::Result<()> {
     let mut days_data = cache::load(&cache_nvs);
     let mut last_fetch_attempt;
     if days_data.is_empty() {
-        draw_status(&mut display, &["Namaz vakitleri", "indiriliyor..."])?;
+        draw_status(
+            &mut display,
+            &[language::text(settings.language, Msg::PrayerDownloading)],
+            settings.language,
+        )?;
         // A failed initial fetch must not be fatal: with an empty cache there
         // is nothing to show yet, but the device should stay alive, show a
         // status screen, and let the main loop's throttled refresh path keep
         // retrying (DNS/API outages, TLS failures and captive WiFi are all
         // recoverable without a reboot).
-        match fetch_with_retry(&mut display, 5) {
+        match fetch_with_retry(&mut display, 5, settings.language) {
             Ok(fresh) => {
                 cache::save(&cache_nvs, &fresh);
                 days_data = fresh;
@@ -240,7 +306,11 @@ fn main() -> anyhow::Result<()> {
                 log::warn!("Initial prayer-time fetch failed, retrying in background: {e:?}");
                 draw_status(
                     &mut display,
-                    &["Namaz vakitleri alınamadı", "Arka planda tekrar denenecek..."],
+                    &[
+                        language::text(settings.language, Msg::PrayerFetchFailed),
+                        language::text(settings.language, Msg::RetryingInBackground),
+                    ],
+                    settings.language,
                 )?;
             }
         }
@@ -248,7 +318,10 @@ fn main() -> anyhow::Result<()> {
         // interval before its next try instead of hammering a failed endpoint.
         last_fetch_attempt = now_epoch();
     } else {
-        log::info!("Loaded {} cached prayer-time days from NVS", days_data.len());
+        log::info!(
+            "Loaded {} cached prayer-time days from NVS",
+            days_data.len()
+        );
         last_fetch_attempt = 0;
     }
 
@@ -260,30 +333,39 @@ fn main() -> anyhow::Result<()> {
     // repaint once a minute rather than every second.
     let mut last_drawn_minute: Option<i64> = None;
 
-    // Tapping the touchscreen toggles the header between Miladi/Hijri dates.
-    let mut date_mode = DateMode::Miladi;
-    let mut touch_streak = 0u8;
-    let mut toggled_this_press = false;
+    // The header date mode now comes from persisted settings rather than a
+    // tap gesture. `press_handled` de-bounces the gear tap so one finger-down
+    // opens the settings screen exactly once.
+    let mut press_handled = false;
 
     let mut last_tick = Instant::now() - Duration::from_secs(1); // run the first tick immediately
 
     // --- Main loop ---
     loop {
-        // Touch is polled every iteration (fast) so taps feel responsive;
-        // the heavier clock/API-refresh logic below only runs once a second.
-        match touch.is_touched() {
-            Ok(true) => {
-                touch_streak = touch_streak.saturating_add(1);
-                if touch_streak == 2 && !toggled_this_press {
-                    date_mode = date_mode.toggled();
-                    toggled_this_press = true;
-                    last_drawn_minute = None; // force header repaint on next tick
+        // Touch is polled every iteration (fast) so the gear tap feels
+        // responsive; the heavier clock/API-refresh logic below only runs once
+        // a second. Touch on the dashboard is used solely to hit-test the gear
+        // icon — tapping elsewhere does nothing.
+        match touch.sample_position() {
+            Ok(Some((x_raw, y_raw))) => {
+                if !press_handled {
+                    press_handled = true;
+                    let (x, y) = calibration.to_screen(x_raw, y_raw);
+                    if settings_screen::point_in_icon(x, y) {
+                        run_settings_screen(
+                            &mut display,
+                            &mut touch,
+                            &calibration,
+                            &settings_nvs,
+                            &mut settings,
+                        )?;
+                        // Leaving settings forces a full dashboard repaint.
+                        frame_state = None;
+                        last_drawn_minute = None;
+                    }
                 }
             }
-            Ok(false) => {
-                touch_streak = 0;
-                toggled_this_press = false;
-            }
+            Ok(None) => press_handled = false,
             Err(e) => log::warn!("Touch read failed: {e:?}"),
         }
 
@@ -313,7 +395,11 @@ fn main() -> anyhow::Result<()> {
             let next = timeline.iter().position(|e| e.at > now_local_secs);
 
             let Some(idx) = next else {
-                draw_status(&mut display, &["Namaz vakti verisi", "eksik, yenileniyor..."])?;
+                draw_status(
+                    &mut display,
+                    &[language::text(settings.language, Msg::PrayerDataMissing)],
+                    settings.language,
+                )?;
                 frame_state = None; // force a full repaint once data is back
                 continue;
             };
@@ -333,7 +419,11 @@ fn main() -> anyhow::Result<()> {
             let today_start = day_start_secs(&local);
             let next_is_today = next_entry.at >= today_start
                 && next_entry.at < today_start + time_utils::SECS_PER_DAY;
-            let next_today_label = if next_is_today { Some(next_entry.label) } else { None };
+            let next_today_label = if next_is_today {
+                Some(next_entry.label)
+            } else {
+                None
+            };
 
             let day_changed = frame_state
                 .as_ref()
@@ -341,7 +431,7 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or(true);
 
             if day_changed {
-                draw_static_frame(&mut display, today_row, next_today_label)?;
+                draw_static_frame(&mut display, today_row, next_today_label, settings.language)?;
                 last_drawn_minute = None; // force the clock/countdown to repaint too
             } else if frame_state.as_ref().unwrap().next_today_label != next_today_label {
                 update_card_highlight(
@@ -349,6 +439,7 @@ fn main() -> anyhow::Result<()> {
                     today_row,
                     frame_state.as_ref().unwrap().next_today_label,
                     next_today_label,
+                    settings.language,
                 )?;
             }
 
@@ -358,10 +449,11 @@ fn main() -> anyhow::Result<()> {
                     &mut display,
                     &local,
                     today_row,
-                    date_mode,
+                    settings.date_mode,
                     next_entry.label,
                     remaining,
                     progress,
+                    settings.language,
                 )?;
                 last_drawn_minute = Some(current_minute);
             }
@@ -419,7 +511,11 @@ fn build_timeline(days_data: &[DayTimes], local: &LocalTime) -> Vec<TimelineEntr
     out
 }
 
-fn fetch_with_retry<D>(display: &mut D, attempts: u32) -> anyhow::Result<Vec<DayTimes>>
+fn fetch_with_retry<D>(
+    display: &mut D,
+    attempts: u32,
+    lang: Language,
+) -> anyhow::Result<Vec<DayTimes>>
 where
     D: DrawTarget<Color = Rgb565>,
 {
@@ -431,7 +527,11 @@ where
                 log::warn!("Fetch attempt {attempt}/{attempts} failed: {e:?}");
                 let _ = draw_status(
                     display,
-                    &["Namaz vakitleri indirilemedi", "Tekrar deneniyor..."],
+                    &[
+                        language::text(lang, Msg::PrayerDownloadFailed),
+                        language::text(lang, Msg::Retrying),
+                    ],
+                    lang,
                 );
                 last_err = Some(e);
                 std::thread::sleep(Duration::from_secs(3));
@@ -443,8 +543,14 @@ where
 
 fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> anyhow::Result<()> {
     wifi.set_configuration(&WifiConfiguration::Client(ClientConfiguration {
-        ssid: CONFIG.wifi_ssid.try_into().map_err(|_| anyhow::anyhow!("SSID too long"))?,
-        password: CONFIG.wifi_psk.try_into().map_err(|_| anyhow::anyhow!("password too long"))?,
+        ssid: CONFIG
+            .wifi_ssid
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("SSID too long"))?,
+        password: CONFIG
+            .wifi_psk
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("password too long"))?,
         auth_method: AuthMethod::WPA2Personal,
         ..Default::default()
     }))?;
@@ -455,19 +561,90 @@ fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> anyhow::Result<()>
     Ok(())
 }
 
-fn draw_status<D>(display: &mut D, lines: &[&str]) -> anyhow::Result<()>
+/// Maps a Turkish prayer label (the stable key used across the timeline) to the
+/// active language's prayer name for display.
+fn localize_prayer(label: &str, lang: Language) -> &'static str {
+    let tr = language::prayer_names(Language::Turkish);
+    let idx = tr.iter().position(|n| *n == label).unwrap_or(0);
+    language::prayer_names(lang)[idx]
+}
+
+/// Maps `LocalTime::weekday_name()` (Turkish) to the active language's weekday.
+fn localize_weekday(tr_name: &str, lang: Language) -> &'static str {
+    let tr = language::weekday_names(Language::Turkish);
+    let idx = tr.iter().position(|n| *n == tr_name).unwrap_or(0);
+    language::weekday_names(lang)[idx]
+}
+
+/// Shows the settings screen and processes taps until the user presses back.
+/// Language / date-mode selections are applied immediately, persisted to NVS,
+/// and re-rendered so the whole screen reflects the new choice.
+fn run_settings_screen<D, SPI>(
+    display: &mut D,
+    touch: &mut Xpt2046<SPI>,
+    calibration: &touch_calibration::Calibration,
+    settings_nvs: &esp_idf_svc::nvs::EspNvs<esp_idf_svc::nvs::NvsDefault>,
+    settings: &mut settings::Settings,
+) -> anyhow::Result<()>
+where
+    D: DrawTarget<Color = Rgb565>,
+    SPI: embedded_hal::spi::SpiDevice,
+{
+    settings_screen::draw(display, settings)?;
+    // Wait for the finger that opened the screen to lift before polling, so the
+    // same press can't immediately trigger a control underneath the gear.
+    while matches!(touch.is_touched(), Ok(true)) {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let mut press_handled = false;
+    loop {
+        match touch.sample_position() {
+            Ok(Some((x_raw, y_raw))) => {
+                if !press_handled {
+                    press_handled = true;
+                    let (x, y) = calibration.to_screen(x_raw, y_raw);
+                    match settings_screen::hit_test(x, y) {
+                        Some(settings_screen::Hit::Back) => return Ok(()),
+                        Some(settings_screen::Hit::Language(l)) => {
+                            settings.language = l;
+                            settings::save_language(settings_nvs, l);
+                            settings_screen::draw(display, settings)?;
+                        }
+                        Some(settings_screen::Hit::DateMode(m)) => {
+                            settings.date_mode = m;
+                            settings::save_date_mode(settings_nvs, m);
+                            settings_screen::draw(display, settings)?;
+                        }
+                        None => {}
+                    }
+                }
+            }
+            Ok(None) => press_handled = false,
+            Err(e) => log::warn!("Touch read failed in settings: {e:?}"),
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+}
+
+fn draw_status<D>(display: &mut D, lines: &[&str], lang: Language) -> anyhow::Result<()>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     display
         .clear(col_bg())
         .map_err(|_| anyhow::anyhow!("draw error"))?;
-    let style = MonoTextStyle::new(&FONT_10X20, col_text());
     let mut y = 150 - (lines.len() as i32 - 1) * 12;
     for line in lines {
-        Text::with_alignment(line, Point::new(240, y), style, Alignment::Center)
-            .draw(display)
-            .map_err(|_| anyhow::anyhow!("draw error"))?;
+        text::draw_line(
+            display,
+            line,
+            Point::new(240, y),
+            text::HAlign::Center,
+            col_text(),
+            lang,
+            text::Size::Medium,
+        )?;
         y += 26;
     }
     Ok(())
@@ -486,6 +663,7 @@ fn draw_static_frame<D>(
     display: &mut D,
     today: Option<&DayTimes>,
     next_today_label: Option<&str>,
+    lang: Language,
 ) -> anyhow::Result<()>
 where
     D: DrawTarget<Color = Rgb565>,
@@ -502,7 +680,7 @@ where
     if let Some(today) = today {
         for i in 0..5 {
             let name = today.prayers()[i].0;
-            draw_card(display, today, i, next_today_label == Some(name))?;
+            draw_card(display, today, i, next_today_label == Some(name), lang)?;
         }
     }
 
@@ -517,6 +695,7 @@ fn update_card_highlight<D>(
     today: Option<&DayTimes>,
     old_label: Option<&str>,
     new_label: Option<&str>,
+    lang: Language,
 ) -> anyhow::Result<()>
 where
     D: DrawTarget<Color = Rgb565>,
@@ -527,57 +706,70 @@ where
     let prayers = today.prayers();
     for (i, (name, _)) in prayers.iter().enumerate() {
         if Some(*name) == old_label {
-            draw_card(display, today, i, false)?;
+            draw_card(display, today, i, false, lang)?;
         }
         if Some(*name) == new_label {
-            draw_card(display, today, i, true)?;
+            draw_card(display, today, i, true, lang)?;
         }
     }
     Ok(())
 }
 
-fn draw_card<D>(display: &mut D, today: &DayTimes, index: usize, highlighted: bool) -> anyhow::Result<()>
+fn draw_card<D>(
+    display: &mut D,
+    today: &DayTimes,
+    index: usize,
+    highlighted: bool,
+    lang: Language,
+) -> anyhow::Result<()>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    let (name, hhmm) = today.prayers()[index];
+    let (_, hhmm) = today.prayers()[index];
+    // Prayer names are localized for display; the highlight identity still
+    // keys off the stable label from `prayers()`.
+    let name = language::prayer_names(lang)[index];
     let x = CARD_MARGIN + index as i32 * (CARD_W as i32 + CARD_GAP);
 
     let border_style = PrimitiveStyleBuilder::new()
         .stroke_color(if highlighted { col_accent() } else { col_dim() })
         .stroke_width(1)
-        .fill_color(if highlighted { col_accent() } else { col_card_bg() })
+        .fill_color(if highlighted {
+            col_accent()
+        } else {
+            col_card_bg()
+        })
         .build();
     Rectangle::new(Point::new(x, CARD_Y), Size::new(CARD_W, CARD_H))
         .into_styled(border_style)
         .draw(display)
         .map_err(|_| anyhow::anyhow!("draw error"))?;
 
-    let (ns, ts) = if highlighted {
-        (
-            MonoTextStyle::new(&FONT_7X13_BOLD, col_accent_dark()),
-            MonoTextStyle::new(&FONT_9X18_BOLD, col_accent_dark()),
-        )
+    let name_color = if highlighted {
+        col_accent_dark()
     } else {
-        (
-            MonoTextStyle::new(&FONT_7X13_BOLD, col_dim()),
-            MonoTextStyle::new(&FONT_9X18_BOLD, col_text()),
-        )
+        col_dim()
+    };
+    let time_style = if highlighted {
+        MonoTextStyle::new(&FONT_9X18_BOLD, col_accent_dark())
+    } else {
+        MonoTextStyle::new(&FONT_9X18_BOLD, col_text())
     };
 
-    Text::with_alignment(
+    text::draw_line(
+        display,
         name,
         Point::new(x + CARD_W as i32 / 2, CARD_Y + 22),
-        ns,
-        Alignment::Center,
-    )
-    .draw(display)
-    .map_err(|_| anyhow::anyhow!("draw error"))?;
+        text::HAlign::Center,
+        name_color,
+        lang,
+        text::Size::CardName,
+    )?;
 
     Text::with_alignment(
         hhmm,
         Point::new(x + CARD_W as i32 / 2, CARD_Y + 60),
-        ts,
+        time_style,
         Alignment::Center,
     )
     .draw(display)
@@ -601,48 +793,84 @@ fn draw_dynamic<D>(
     next_label: &str,
     remaining_secs: i64,
     progress: Option<f32>,
+    lang: Language,
 ) -> anyhow::Result<()>
 where
     D: DrawTarget<Color = Rgb565>,
 {
-    // Header: city, date (Miladi or Hijri — tap the screen to toggle),
-    // weekday, clock — a single line.
+    // Header: city, date (Miladi or Hijri, chosen in settings), weekday, clock.
     let date_part = match (date_mode, today) {
         (DateMode::Hijri, Some(t)) => format!("{} (H)", t.hijri_date),
         _ => format!("{:02}.{:02}.{}", local.day, local.month, local.year),
     };
-    let header_str = format!(
-        "HAARLEM   {date_part}   {}   {:02}:{:02}",
-        local.weekday_name(),
-        local.hour,
-        local.minute,
-    );
     Rectangle::new(Point::new(0, 0), Size::new(480, 30))
         .into_styled(PrimitiveStyle::with_fill(col_bg()))
         .draw(display)
         .map_err(|_| anyhow::anyhow!("draw error"))?;
-    Text::new(
-        &header_str,
-        Point::new(10, 20),
-        MonoTextStyle::new(&FONT_9X15, col_text()),
-    )
-    .draw(display)
-    .map_err(|_| anyhow::anyhow!("draw error"))?;
+    if lang.is_rtl() {
+        // Keep the numeric city/date/clock left-to-right in the mono font
+        // (reversing digits would corrupt them) and render the Arabic weekday
+        // on the right, shaped, before the gear icon.
+        let latin = format!(
+            "HAARLEM   {date_part}   {:02}:{:02}",
+            local.hour, local.minute
+        );
+        Text::new(
+            &latin,
+            Point::new(10, 20),
+            MonoTextStyle::new(&FONT_9X15, col_text()),
+        )
+        .draw(display)
+        .map_err(|_| anyhow::anyhow!("draw error"))?;
+        let weekday = localize_weekday(local.weekday_name(), lang);
+        text::draw_line(
+            display,
+            weekday,
+            Point::new(438, 20),
+            text::HAlign::Right,
+            col_text(),
+            lang,
+            text::Size::Small,
+        )?;
+    } else {
+        let weekday = localize_weekday(local.weekday_name(), lang);
+        let header_str = format!(
+            "HAARLEM   {date_part}   {weekday}   {:02}:{:02}",
+            local.hour, local.minute
+        );
+        text::draw_line(
+            display,
+            &header_str,
+            Point::new(10, 20),
+            text::HAlign::Left,
+            col_text(),
+            lang,
+            text::Size::Small,
+        )?;
+    }
+    // Gear icon lives in the header band and must be repainted after the header
+    // clears its region each minute.
+    settings_screen::draw_gear_icon(display)?;
 
-    // Next-vakit label
-    let next_line = format!("SIRADAKİ VAKİT: {next_label}");
+    // Next-vakit label (localized prefix + localized prayer name).
+    let next_line = format!(
+        "{} {}",
+        language::text(lang, Msg::NextPrayer),
+        localize_prayer(next_label, lang)
+    );
     Rectangle::new(Point::new(0, 40), Size::new(480, 22))
         .into_styled(PrimitiveStyle::with_fill(col_bg()))
         .draw(display)
         .map_err(|_| anyhow::anyhow!("draw error"))?;
-    Text::with_alignment(
+    text::draw_line(
+        display,
         &next_line,
         Point::new(240, 58),
-        MonoTextStyle::new(&FONT_10X20, col_accent()),
-        Alignment::Center,
-    )
-    .draw(display)
-    .map_err(|_| anyhow::anyhow!("draw error"))?;
+        text::HAlign::Center,
+        col_accent(),
+        lang,
+        text::Size::Medium,
+    )?;
 
     // Big countdown, minute resolution ("HH:MM" — seconds were removed since
     // the display only repaints once a minute anyway).
