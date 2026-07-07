@@ -15,6 +15,7 @@
 pub enum Language {
     Turkish,
     English,
+    Nederlands,
     Arabic,
 }
 
@@ -32,6 +33,7 @@ impl Language {
             Language::Turkish => 0,
             Language::English => 1,
             Language::Arabic => 2,
+            Language::Nederlands => 3,
         }
     }
 
@@ -40,6 +42,7 @@ impl Language {
         match value {
             1 => Language::English,
             2 => Language::Arabic,
+            3 => Language::Nederlands,
             _ => Language::Turkish,
         }
     }
@@ -50,9 +53,14 @@ impl Language {
         matches!(self, Language::Arabic)
     }
 
-    /// The three selectable languages, in the order the settings screen lists
-    /// them (Arabic, English, Türkçe — matching the issue's spec).
-    pub const ALL: [Language; 3] = [Language::Arabic, Language::English, Language::Turkish];
+    /// The selectable languages, in the order the settings screen lists them:
+    /// alphabetical by endonym — العربية, English, Nederlands, Türkçe.
+    pub const ALL: [Language; 4] = [
+        Language::Arabic,
+        Language::English,
+        Language::Nederlands,
+        Language::Turkish,
+    ];
 }
 
 /// The 5 daily prayer names, indexed the same as [`crate::prayer_times`]'s
@@ -61,6 +69,7 @@ pub fn prayer_names(lang: Language) -> [&'static str; 5] {
     match lang {
         Language::Turkish => ["İMSAK", "ÖĞLE", "İKİNDİ", "AKŞAM", "YATSI"],
         Language::English => ["FAJR", "DHUHR", "ASR", "MAGHRIB", "ISHA"],
+        Language::Nederlands => ["FAJR", "DHUHR", "ASR", "MAGHRIB", "ISHA"],
         Language::Arabic => ["الفجر", "الظهر", "العصر", "المغرب", "العشاء"],
     }
 }
@@ -86,6 +95,15 @@ pub fn weekday_names(lang: Language) -> [&'static str; 7] {
             "THURSDAY",
             "FRIDAY",
             "SATURDAY",
+        ],
+        Language::Nederlands => [
+            "ZONDAG",
+            "MAANDAG",
+            "DINSDAG",
+            "WOENSDAG",
+            "DONDERDAG",
+            "VRIJDAG",
+            "ZATERDAG",
         ],
         Language::Arabic => [
             "الأحد",
@@ -195,6 +213,34 @@ pub fn text(lang: Language, msg: Msg) -> &'static str {
         (Language::English, CalUsingDefaults) => "Using default values",
         (Language::English, CalRecalibrating) => "Recalibrating touch",
 
+        // --- Nederlands ---
+        (Language::Nederlands, AppTitle) => "Gebedstijden",
+        (Language::Nederlands, Starting) => "Bezig met opstarten...",
+        (Language::Nederlands, WifiConnecting) => "Verbinden met wifi...",
+        (Language::Nederlands, WifiConnectFailed) => "Wifi-verbinding mislukt",
+        (Language::Nederlands, Restarting) => "Opnieuw opstarten...",
+        (Language::Nederlands, TimeSyncing) => "Klok synchroniseren...",
+        (Language::Nederlands, PrayerDownloading) => "Gebedstijden downloaden...",
+        (Language::Nederlands, PrayerFetchFailed) => "Kon gebedstijden niet ophalen",
+        (Language::Nederlands, RetryingInBackground) => "Opnieuw proberen op de achtergrond...",
+        (Language::Nederlands, PrayerDownloadFailed) => "Downloaden gebedstijden mislukt",
+        (Language::Nederlands, Retrying) => "Opnieuw proberen...",
+        (Language::Nederlands, PrayerDataMissing) => "Gebedsgegevens ontbreken, vernieuwen...",
+        (Language::Nederlands, NextPrayer) => "VOLGEND GEBED:",
+        (Language::Nederlands, SettingsTitle) => "Instellingen",
+        (Language::Nederlands, LanguageHeading) => "Taal",
+        (Language::Nederlands, DateHeading) => "Datum",
+        (Language::Nederlands, DateMiladi) => "Gregoriaans",
+        (Language::Nederlands, DateHijri) => "Hidjri",
+        (Language::Nederlands, CalTitle) => "Aanraakkalibratie",
+        (Language::Nederlands, CalTapCrosshair) => "Tik met een stylus op het kruis",
+        (Language::Nederlands, CalComplete) => "Kalibratie voltooid",
+        (Language::Nederlands, CalFailed) => "Kalibratie mislukt",
+        (Language::Nederlands, CalRetry) => "Probeer opnieuw",
+        (Language::Nederlands, CalSkipped) => "Kalibratie overgeslagen",
+        (Language::Nederlands, CalUsingDefaults) => "Standaardwaarden gebruiken",
+        (Language::Nederlands, CalRecalibrating) => "Aanraking opnieuw kalibreren",
+
         // --- Arabic (logical order; shaped for display by `crate::arabic`) ---
         (Language::Arabic, AppTitle) => "أوقات الصلاة",
         (Language::Arabic, Starting) => "جاري البدء...",
@@ -231,6 +277,7 @@ pub fn language_label(lang: Language) -> &'static str {
     match lang {
         Language::Turkish => "Türkçe",
         Language::English => "English",
+        Language::Nederlands => "Nederlands",
         Language::Arabic => "العربية",
     }
 }

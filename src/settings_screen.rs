@@ -96,10 +96,10 @@ where
 }
 
 // --- Option box layout ---
-const BOX_W: u32 = 140;
-const BOX_H: u32 = 44;
-const BOX_GAP: i32 = 15;
-const BOX_X0: i32 = 20;
+const BOX_W: u32 = 110;
+const BOX_H: u32 = 40;
+const BOX_GAP: i32 = 8;
+const BOX_X0: i32 = 8;
 const LANG_ROW_Y: i32 = 92;
 const DATE_ROW_Y: i32 = 182;
 
@@ -164,7 +164,10 @@ where
 
     // Section headings, aligned to the option column (flipped for RTL).
     let (heading_x, heading_align) = if lang.is_rtl() {
-        (box_x(2) + BOX_W as i32, HAlign::Right)
+        (
+            box_x(Language::ALL.len() as i32 - 1) + BOX_W as i32,
+            HAlign::Right,
+        )
     } else {
         (BOX_X0, HAlign::Left)
     };
@@ -258,11 +261,11 @@ where
     text::draw_line(
         display,
         label,
-        Point::new(x + BOX_W as i32 / 2, y + 29),
+        Point::new(x + BOX_W as i32 / 2, y + 25),
         HAlign::Center,
         color,
         label_lang,
-        crate::text::Size::Medium,
+        crate::text::Size::Small,
     )?;
     Ok(())
 }
