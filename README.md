@@ -212,6 +212,24 @@ means the first `cargo build` clones and builds ESP-IDF itself (~1-2GB,
 several minutes) into `.embuild/` inside this project directory — no global
 install needed, but expect a slow first build.
 
+### macOS-specific gotchas
+
+- **`cmake`/`ninja` via Homebrew**: `brew install cmake ninja`.
+- **If `cargo`/`rustc` aren't on `PATH` even after `. ~/export-esp.sh`**:
+  Homebrew's `rustup` formula (`brew install rustup`) doesn't create the
+  usual `~/.cargo/bin/cargo`/`rustc` proxy shims that `rustup-init` normally
+  does, so plain `rustup`-managed toolchains can be invisible to your shell.
+  Confirm with `rustup which cargo` (should resolve to the `esp` toolchain
+  because of [`rust-toolchain.toml`](rust-toolchain.toml)); if that path
+  works but bare `cargo` doesn't, add its directory to `PATH` for the
+  session: `export PATH="$HOME/.rustup/toolchains/esp/bin:$PATH"`.
+- **No CH340/CP210x driver install needed** on modern macOS (Ventura+) —
+  Apple ships native DriverKit support for those chips
+  (`AppleUSBCHCOM.dext`/`AppleUSBSLCOM.dext`). If the board doesn't show up
+  as `/dev/cu.usbserial-*` after plugging in (see
+  [Build & flash](#build--flash) below), suspect the USB cable (many bundled
+  cables are charge-only) or port/hub before chasing a driver.
+
 ## Configuration (WiFi credentials)
 
 WiFi SSID/password are compiled in via [`toml-cfg`](https://github.com/jamesmunns/toml-cfg)
@@ -238,6 +256,21 @@ cargo build --release
 espflash flash --port /dev/ttyUSB0 target/xtensa-esp32-espidf/release/namaz-vakti
 espflash monitor --port /dev/ttyUSB0   # optional: view logs over serial
 ```
+
+`--port` can be omitted — `espflash flash` will prompt you to pick from the
+detected ports if there's ambiguity. To find it yourself:
+
+- **macOS**: `ls /dev/cu.*` before and after plugging in; the new entry is
+  usually `/dev/cu.usbserial-<n>`. If nothing new shows up, it's almost
+  always the USB cable (charge-only) or port, not a missing driver — see
+  the macOS gotchas above.
+- **Linux**: `/dev/ttyUSB0` (or `ttyACM0`) as in the example above; `dmesg
+  | tail` after plugging in confirms it.
+
+`espflash monitor` opens an interactive session (`Ctrl+R` reset, `Ctrl+C`
+exit) and needs a real terminal with a TTY attached — it'll fail with
+"Failed to initialize input reader" if run from a script or a
+non-interactive shell.
 
 ### Flashing from WSL2
 
