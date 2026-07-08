@@ -101,10 +101,21 @@ const BOX_H: u32 = 40;
 const BOX_GAP: i32 = 8;
 const BOX_X0: i32 = 8;
 const LANG_ROW_Y: i32 = 92;
-const DATE_ROW_Y: i32 = 182;
+const DATE_ROW_Y: i32 = 172;
 
 fn box_x(col: i32) -> i32 {
     BOX_X0 + col * (BOX_W as i32 + BOX_GAP)
+}
+
+// --- System row: two wide action buttons (WiFi setup, touch recalibration) ---
+// These are actions, not toggles, so they get their own wider geometry — their
+// labels don't fit the 110px option boxes above.
+const SYS_ROW_Y: i32 = 258;
+const SYS_BOX_W: u32 = 228;
+const SYS_BOX_GAP: i32 = 8;
+
+fn sys_box_x(col: i32) -> i32 {
+    BOX_X0 + col * (SYS_BOX_W as i32 + SYS_BOX_GAP)
 }
 
 /// Something the user can tap on the settings screen.
@@ -115,6 +126,10 @@ pub enum Hit {
     Language(Language),
     /// Select this header date mode.
     DateMode(DateMode),
+    /// Open the on-device WiFi setup flow (re-provision credentials).
+    Wifi,
+    /// Re-run the touch-calibration wizard.
+    Recalibrate,
 }
 
 /// Maps a calibrated tap to the settings control under it, if any.
@@ -132,11 +147,21 @@ pub fn hit_test(x: i32, y: i32) -> Option<Hit> {
             return Some(Hit::DateMode(*mode));
         }
     }
+    if in_sys_box(x, y, sys_box_x(0)) {
+        return Some(Hit::Wifi);
+    }
+    if in_sys_box(x, y, sys_box_x(1)) {
+        return Some(Hit::Recalibrate);
+    }
     None
 }
 
 fn in_box(x: i32, y: i32, x0: i32, y0: i32) -> bool {
     x >= x0 && x < x0 + BOX_W as i32 && y >= y0 && y < y0 + BOX_H as i32
+}
+
+fn in_sys_box(x: i32, y: i32, x0: i32) -> bool {
+    x >= x0 && x < x0 + SYS_BOX_W as i32 && y >= SYS_ROW_Y && y < SYS_ROW_Y + BOX_H as i32
 }
 
 /// Full-screen repaint of the settings screen for the current `settings`.
@@ -218,6 +243,59 @@ where
         )?;
     }
 
+    // System actions: WiFi setup + touch recalibration. Rendered as accent
+    // buttons (never "selected") since they trigger a flow rather than toggle a
+    // stored value.
+    text::draw_line(
+        display,
+        language::text(lang, Msg::SystemHeading),
+        Point::new(heading_x, SYS_ROW_Y - 12),
+        heading_align,
+        crate::col_dim(),
+        lang,
+        text::Size::Small,
+    )?;
+    draw_action(
+        display,
+        sys_box_x(0),
+        language::text(lang, Msg::WifiMenu),
+        lang,
+    )?;
+    draw_action(
+        display,
+        sys_box_x(1),
+        language::text(lang, Msg::RecalibrateTouch),
+        lang,
+    )?;
+
+    Ok(())
+}
+
+/// Draws one wide, tappable action button (WiFi setup / recalibration). Uses
+/// the accent border so it reads as an actionable control rather than a
+/// selectable option.
+fn draw_action<D>(display: &mut D, x: i32, label: &str, lang: Language) -> anyhow::Result<()>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let border = PrimitiveStyleBuilder::new()
+        .stroke_color(crate::col_accent())
+        .stroke_width(1)
+        .fill_color(crate::col_card_bg())
+        .build();
+    Rectangle::new(Point::new(x, SYS_ROW_Y), Size::new(SYS_BOX_W, BOX_H))
+        .into_styled(border)
+        .draw(display)
+        .map_err(|_| anyhow::anyhow!("draw error"))?;
+    text::draw_line(
+        display,
+        label,
+        Point::new(x + SYS_BOX_W as i32 / 2, SYS_ROW_Y + 25),
+        HAlign::Center,
+        crate::col_accent(),
+        lang,
+        text::Size::Small,
+    )?;
     Ok(())
 }
 

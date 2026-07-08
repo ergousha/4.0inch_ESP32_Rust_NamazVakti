@@ -1,6 +1,12 @@
-# Copy this file to `cfg.toml` (same directory) and fill in your real WiFi
-# credentials. `cfg.toml` is gitignored so your password never ends up in the
-# repo; the values are baked into the firmware at compile time via toml-cfg.
+# OPTIONAL dev/CI convenience. WiFi credentials are normally set on the device
+# via the on-screen setup flow (see README → Configuration); you do NOT need
+# this file for a normal build.
+#
+# If present, copy this file to `cfg.toml` (same directory) and fill in your
+# real credentials: they get baked into the firmware via toml-cfg and used to
+# *seed* NVS on the very first boot only (handy for a headless bench/CI build
+# with no one to tap through setup). The on-device value always wins afterwards.
+# `cfg.toml` is gitignored so your password never ends up in the repo.
 [namaz-vakti]
 wifi_ssid = "YOUR_WIFI_SSID"
 wifi_psk = "YOUR_WIFI_PASSWORD"

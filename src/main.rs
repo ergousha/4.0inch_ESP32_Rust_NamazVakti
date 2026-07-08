@@ -7,6 +7,8 @@ mod text;
 mod time_utils;
 mod touch;
 mod touch_calibration;
+mod wifi_credentials;
+mod wifi_setup;
 
 use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -46,6 +48,7 @@ use namaz_vakti_logic::language::{self, Language, Msg};
 use prayer::DayTimes;
 use time_utils::LocalTime;
 use touch::Xpt2046;
+use wifi_credentials::WifiCredentials;
 
 /// Default backlight brightness as a percentage of max PWM duty. Lower this
 /// if you want a dimmer default; the backlight is on GPIO27 via LEDC PWM.
@@ -207,7 +210,7 @@ fn main() -> anyhow::Result<()> {
         log::info!("Re-calibration gesture detected; clearing saved touch calibration");
         touch_calibration::clear(&touch_cal_nvs);
     }
-    let calibration = match touch_calibration::load(&touch_cal_nvs) {
+    let mut calibration = match touch_calibration::load(&touch_cal_nvs) {
         Some(cal) if !force_recalibrate => {
             log::info!("Loaded saved touch calibration: {cal:?}");
             cal
@@ -240,31 +243,51 @@ fn main() -> anyhow::Result<()> {
         settings.language,
     )?;
 
-    // --- WiFi ---
-    draw_status(
-        &mut display,
-        &[
-            language::text(settings.language, Msg::WifiConnecting),
-            CONFIG.wifi_ssid,
-        ],
-        settings.language,
-    )?;
+    // --- Prayer-time cache: opened before WiFi so a failed reconnect can show
+    // a "reconnecting" indicator (there is cached data to fall back on) rather
+    // than a first-time "connecting" splash. ---
+    let cache_nvs = cache::open(nvs.clone())?;
+    let mut days_data = cache::load(&cache_nvs);
+    let have_cache = !days_data.is_empty();
+
+    // --- WiFi credentials + connection ---
+    // Credentials live in NVS now (set on-device via the setup flow below),
+    // replacing the compile-time cfg.toml values. cfg.toml, if present, only
+    // *seeds* NVS on first boot, so headless CI/bench builds still connect
+    // without a person to tap through setup.
+    let wifi_nvs = wifi_credentials::open(nvs.clone())?;
+    seed_credentials_from_cfg(&wifi_nvs);
+    let creds = wifi_credentials::load(&wifi_nvs);
+
     let mut wifi = BlockingWifi::wrap(
         EspWifi::new(peripherals.modem, sys_loop.clone(), Some(nvs.clone()))?,
         sys_loop,
     )?;
-    if let Err(e) = connect_wifi(&mut wifi) {
-        draw_status(
+
+    // Saved credentials get a bounded retry budget; success continues to
+    // NTP/fetch as before. With no saved credentials, or once the budget is
+    // exhausted, drop into the blocking on-device setup flow instead of the old
+    // reboot-loop-on-failure behavior.
+    let mut connected = false;
+    if let Some(c) = &creds {
+        connected = try_connect(
             &mut display,
-            &[
-                language::text(settings.language, Msg::WifiConnectFailed),
-                language::text(settings.language, Msg::Restarting),
-            ],
+            &mut wifi,
+            c,
+            settings.language,
+            WIFI_CONNECT_ATTEMPTS,
+            have_cache,
+        );
+    }
+    if !connected {
+        provision_and_connect(
+            &mut display,
+            &mut touch,
+            &calibration,
+            &mut wifi,
+            &wifi_nvs,
             settings.language,
         )?;
-        log::error!("WiFi connect failed: {e:?}");
-        std::thread::sleep(Duration::from_secs(5));
-        esp_idf_svc::hal::reset::restart();
     }
     log::info!("WiFi connected");
 
@@ -281,10 +304,8 @@ fn main() -> anyhow::Result<()> {
     }
     log::info!("SNTP sync status: {:?}", sntp.get_sync_status());
 
-    // --- Prayer time data: try the NVS cache first so a reboot can show the
+    // --- Prayer time data: the NVS cache (loaded above) lets a reboot show the
     // dashboard immediately instead of blocking on a fresh HTTPS fetch ---
-    let cache_nvs = cache::open(nvs)?;
-    let mut days_data = cache::load(&cache_nvs);
     let mut last_fetch_attempt;
     if days_data.is_empty() {
         draw_status(
@@ -352,14 +373,63 @@ fn main() -> anyhow::Result<()> {
                     press_handled = true;
                     let (x, y) = calibration.to_screen(x_raw, y_raw);
                     if settings_screen::point_in_icon(x, y) {
-                        run_settings_screen(
+                        match run_settings_screen(
                             &mut display,
                             &mut touch,
                             &calibration,
                             &settings_nvs,
                             &mut settings,
-                        )?;
-                        // Leaving settings forces a full dashboard repaint.
+                        )? {
+                            SettingsExit::Back => {}
+                            SettingsExit::Wifi => {
+                                // Re-provision on demand: run setup, then connect
+                                // + persist on success. A cancel or failed connect
+                                // leaves the existing credentials untouched.
+                                if let Some(new_creds) = wifi_setup::run_setup(
+                                    &mut display,
+                                    &mut touch,
+                                    &calibration,
+                                    &mut wifi,
+                                    settings.language,
+                                )? {
+                                    if try_connect(
+                                        &mut display,
+                                        &mut wifi,
+                                        &new_creds,
+                                        settings.language,
+                                        WIFI_CONNECT_ATTEMPTS,
+                                        false,
+                                    ) {
+                                        wifi_credentials::save(&wifi_nvs, &new_creds);
+                                    } else {
+                                        let _ = draw_status(
+                                            &mut display,
+                                            &[language::text(
+                                                settings.language,
+                                                Msg::WifiConnectFailed,
+                                            )],
+                                            settings.language,
+                                        );
+                                        std::thread::sleep(Duration::from_secs(2));
+                                    }
+                                }
+                            }
+                            SettingsExit::Recalibrate => {
+                                touch_calibration::clear(&touch_cal_nvs);
+                                let outcome = touch_calibration::run_wizard(
+                                    &mut display,
+                                    &mut touch,
+                                    480,
+                                    320,
+                                    settings.language,
+                                );
+                                if outcome.should_persist() {
+                                    touch_calibration::save(&touch_cal_nvs, &outcome.calibration());
+                                }
+                                calibration = outcome.calibration();
+                            }
+                        }
+                        // Leaving settings (or a sub-flow) forces a full repaint.
                         frame_state = None;
                         last_drawn_minute = None;
                     }
@@ -541,24 +611,148 @@ where
     Err(last_err.unwrap_or_else(|| anyhow::anyhow!("unknown fetch error")))
 }
 
-fn connect_wifi(wifi: &mut BlockingWifi<EspWifi<'static>>) -> anyhow::Result<()> {
-    wifi.set_configuration(&WifiConfiguration::Client(ClientConfiguration {
-        ssid: CONFIG
-            .wifi_ssid
+/// Attempts per boot/reconnect before falling back to the on-device setup flow.
+/// Each attempt is bounded by the driver's own connect/DHCP timeouts, so three
+/// attempts is the retry budget referenced in the boot sequence (issue #11) —
+/// no more infinite reboot-loop on broken credentials.
+const WIFI_CONNECT_ATTEMPTS: u32 = 3;
+
+/// Builds the station configuration for the given credentials. Empty PSK selects
+/// an open network (`AuthMethod::None`); anything else is treated as
+/// WPA2-Personal (WPA2-Enterprise/EAP is explicitly out of scope).
+fn client_config(creds: &WifiCredentials) -> anyhow::Result<WifiConfiguration> {
+    let auth_method = if creds.psk.is_empty() {
+        AuthMethod::None
+    } else {
+        AuthMethod::WPA2Personal
+    };
+    Ok(WifiConfiguration::Client(ClientConfiguration {
+        ssid: creds
+            .ssid
+            .as_str()
             .try_into()
             .map_err(|_| anyhow::anyhow!("SSID too long"))?,
-        password: CONFIG
-            .wifi_psk
+        password: creds
+            .psk
+            .as_str()
             .try_into()
             .map_err(|_| anyhow::anyhow!("password too long"))?,
-        auth_method: AuthMethod::WPA2Personal,
+        auth_method,
         ..Default::default()
-    }))?;
+    }))
+}
 
-    wifi.start()?;
+/// A single bounded connect attempt: (re)configure, ensure started, associate,
+/// wait for an IP. The `BlockingWifi` connect/`wait_netif_up` calls each carry
+/// the driver's built-in timeout, so this returns rather than hanging.
+fn connect_once(
+    wifi: &mut BlockingWifi<EspWifi<'static>>,
+    creds: &WifiCredentials,
+) -> anyhow::Result<()> {
+    wifi.set_configuration(&client_config(creds)?)?;
+    if !wifi.is_started().unwrap_or(false) {
+        wifi.start()?;
+    }
     wifi.connect()?;
     wifi.wait_netif_up()?;
     Ok(())
+}
+
+/// Tries to connect up to `attempts` times, returning `true` on success. Shows a
+/// status splash between tries — "reconnecting" when there is cached data to
+/// fall back on, otherwise "connecting". The specific disconnect reason isn't
+/// surfaced by the blocking API (a wrong password and an unreachable AP both
+/// present as a timeout), so a generic failure message is shown.
+fn try_connect<D>(
+    display: &mut D,
+    wifi: &mut BlockingWifi<EspWifi<'static>>,
+    creds: &WifiCredentials,
+    lang: Language,
+    attempts: u32,
+    reconnecting: bool,
+) -> bool
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let heading = if reconnecting {
+        Msg::WifiReconnecting
+    } else {
+        Msg::WifiConnecting
+    };
+    for attempt in 1..=attempts {
+        let _ = draw_status(
+            display,
+            &[language::text(lang, heading), creds.ssid.as_str()],
+            lang,
+        );
+        match connect_once(wifi, creds) {
+            Ok(()) => return true,
+            Err(e) => {
+                log::warn!("WiFi connect attempt {attempt}/{attempts} failed: {e:?}");
+                // Reset the driver state before the next association attempt.
+                let _ = wifi.disconnect();
+                std::thread::sleep(Duration::from_secs(1));
+            }
+        }
+    }
+    let _ = draw_status(
+        display,
+        &[language::text(lang, Msg::WifiConnectFailed)],
+        lang,
+    );
+    std::thread::sleep(Duration::from_secs(2));
+    false
+}
+
+/// Blocking on-device provisioning: runs the setup UI, then connects with the
+/// entered credentials, persisting them only on a successful connection. Loops
+/// on a failed connection (e.g. a mistyped passphrase) so the user gets another
+/// try without a reboot. Used at boot when there are no working saved
+/// credentials.
+fn provision_and_connect<D, SPI>(
+    display: &mut D,
+    touch: &mut Xpt2046<SPI>,
+    calibration: &touch_calibration::Calibration,
+    wifi: &mut BlockingWifi<EspWifi<'static>>,
+    wifi_nvs: &esp_idf_svc::nvs::EspNvs<esp_idf_svc::nvs::NvsDefault>,
+    lang: Language,
+) -> anyhow::Result<()>
+where
+    D: DrawTarget<Color = Rgb565>,
+    SPI: embedded_hal::spi::SpiDevice,
+{
+    loop {
+        // At boot there is nothing to fall back on, so a "cancel" (None) just
+        // re-opens setup — WiFi is required to make progress.
+        let Some(creds) = wifi_setup::run_setup(display, touch, calibration, wifi, lang)? else {
+            continue;
+        };
+        if try_connect(display, wifi, &creds, lang, WIFI_CONNECT_ATTEMPTS, false) {
+            wifi_credentials::save(wifi_nvs, &creds);
+            return Ok(());
+        }
+        // Connection failed with fresh credentials — loop back into setup.
+    }
+}
+
+/// Seeds NVS from the compile-time `cfg.toml` credentials on first boot only, so
+/// headless CI/bench builds (with no one to tap through setup) still connect.
+/// A no-op once NVS already holds credentials, or when `cfg.toml` is absent
+/// (the default empty `CONFIG.wifi_ssid`).
+fn seed_credentials_from_cfg(wifi_nvs: &esp_idf_svc::nvs::EspNvs<esp_idf_svc::nvs::NvsDefault>) {
+    if CONFIG.wifi_ssid.is_empty() {
+        return; // no build-time seed configured
+    }
+    if wifi_credentials::load(wifi_nvs).is_some() {
+        return; // NVS already provisioned — never override the on-device value
+    }
+    let seed = WifiCredentials::new(CONFIG.wifi_ssid, CONFIG.wifi_psk);
+    if seed.is_valid() {
+        log::info!("Seeding WiFi credentials from cfg.toml on first boot");
+        wifi_credentials::save(wifi_nvs, &seed);
+    } else {
+        log::warn!("cfg.toml WiFi credentials are invalid; skipping first-boot seed");
+    }
 }
 
 /// Maps a Turkish prayer label (the stable key used across the timeline) to the
@@ -576,16 +770,27 @@ fn localize_weekday(tr_name: &str, lang: Language) -> &'static str {
     language::weekday_names(lang)[idx]
 }
 
-/// Shows the settings screen and processes taps until the user presses back.
+/// How the settings screen was left. Language / date-mode toggles are handled
+/// in-place; the two system actions (WiFi setup, touch recalibration) need
+/// hardware handles the caller owns (the `wifi` driver, the calibration NVS),
+/// so they're returned for the main loop to run after the screen closes.
+enum SettingsExit {
+    Back,
+    Wifi,
+    Recalibrate,
+}
+
+/// Shows the settings screen and processes taps until the user leaves it.
 /// Language / date-mode selections are applied immediately, persisted to NVS,
-/// and re-rendered so the whole screen reflects the new choice.
+/// and re-rendered so the whole screen reflects the new choice; tapping a
+/// system action returns the matching [`SettingsExit`] for the caller to run.
 fn run_settings_screen<D, SPI>(
     display: &mut D,
     touch: &mut Xpt2046<SPI>,
     calibration: &touch_calibration::Calibration,
     settings_nvs: &esp_idf_svc::nvs::EspNvs<esp_idf_svc::nvs::NvsDefault>,
     settings: &mut settings::Settings,
-) -> anyhow::Result<()>
+) -> anyhow::Result<SettingsExit>
 where
     D: DrawTarget<Color = Rgb565>,
     SPI: embedded_hal::spi::SpiDevice,
@@ -605,7 +810,11 @@ where
                     press_handled = true;
                     let (x, y) = calibration.to_screen(x_raw, y_raw);
                     match settings_screen::hit_test(x, y) {
-                        Some(settings_screen::Hit::Back) => return Ok(()),
+                        Some(settings_screen::Hit::Back) => return Ok(SettingsExit::Back),
+                        Some(settings_screen::Hit::Wifi) => return Ok(SettingsExit::Wifi),
+                        Some(settings_screen::Hit::Recalibrate) => {
+                            return Ok(SettingsExit::Recalibrate)
+                        }
                         Some(settings_screen::Hit::Language(l)) => {
                             settings.language = l;
                             settings::save_language(settings_nvs, l);

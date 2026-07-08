@@ -106,10 +106,9 @@ y_screen = d·x_raw + e·y_raw + f
 - **Persistence**: on success the 6 coefficients are stored as a JSON blob in
   the `touch`/`calib` NVS namespace (same pattern as the prayer-time cache) and
   reused on every later boot, so the wizard only runs once.
-- **Re-calibration**: **hold the screen for 5 seconds during the boot splash**
-  to clear the saved calibration and re-run the wizard. This is the only
-  trigger for now — there's intentionally no settings-menu entry point yet
-  (deferred until a settings screen exists).
+- **Re-calibration**: either **hold the screen for 5 seconds during the boot
+  splash**, or tap **Settings → Calibrate touch** at any time. Both clear the
+  saved calibration and re-run the wizard.
 - **Fallbacks** (never hang): if a target gets no tap within 30s, or
   verification fails 3 full passes in a row, the firmware falls back to the
   documented vendor-default ADC constants (see the pinout table) with a warning
@@ -181,6 +180,8 @@ src/
 ├── cache.rs        NVS load/save for the fetched prayer-time month
 ├── touch.rs        XPT2046 touch driver (pressure + raw X/Y coordinates)
 ├── touch_calibration.rs  NVS persistence + 5-point calibration wizard + gesture
+├── wifi_credentials.rs   NVS load/save for the on-device WiFi credentials
+├── wifi_setup.rs   Touch-driven WiFi provisioning: scan picker + on-screen keyboard
 ├── time_utils.rs   Calendar math + Europe/Amsterdam DST offset (no libc)
 └── segdisplay.rs    Seven-segment-style big digit renderer (embedded-graphics
                       primitives), used for the countdown clock
@@ -223,8 +224,11 @@ The pure affine solve/apply math (`Calibration`, least-squares `solve_affine`,
     Presentation Forms-B block. Numeric fields (clock, date) stay in the mono
     font so digits aren't reversed. See [`src/text.rs`](src/text.rs) for the
     script-switching draw helper.
-- **Resilience**: if WiFi fails to connect at boot, the device restarts
-  itself after showing an error. If the prayer-time fetch fails, it retries
+- **Resilience**: if WiFi fails to connect at boot, the device retries the
+  saved credentials a bounded number of times (showing a "reconnecting"
+  status when there's cached data to fall back on) and then drops into the
+  on-device WiFi setup flow — no more reboot-loop on stale credentials. If
+  the prayer-time fetch fails, it retries
   a few times with a status screen, then keeps retrying in the background
   (throttled to once per 5 minutes) once the main dashboard is showing.
   A failed/slow NTP sync isn't treated as fatal — in practice the ESP-IDF
@@ -305,9 +309,21 @@ install needed, but expect a slow first build.
 
 ## Configuration (WiFi credentials)
 
-WiFi SSID/password are compiled in via [`toml-cfg`](https://github.com/jamesmunns/toml-cfg)
-so they never end up hardcoded in a `.rs` file (or in this repo — `cfg.toml`
-is gitignored):
+WiFi credentials are set **on the device**: on first boot (or whenever the
+saved credentials stop working), the panel drops into a touch-driven setup
+flow — scan for a network, tap to pick it, and type the passphrase on an
+on-screen keyboard. Credentials are stored in NVS flash (namespace `wifi`,
+key `creds`) and reused on every later boot. You can re-run setup any time from
+**Settings → WiFi** (e.g. after changing routers or passwords). No reflash is
+needed to change networks.
+
+### Optional: seeding credentials at build time (dev/CI)
+
+For a headless bench/CI build — where there's no one to tap through setup — you
+can still bake in credentials via [`toml-cfg`](https://github.com/jamesmunns/toml-cfg).
+If present, `cfg.toml` only *seeds* NVS on the very first boot (when no
+credentials are stored yet); the on-device value always wins afterwards.
+`cfg.toml` is gitignored, so the password never ends up in the repo:
 
 ```sh
 cp cfg.toml.example cfg.toml
@@ -364,12 +380,12 @@ It should then show up in WSL as `/dev/ttyUSB0`.
 
 ## Possible future work
 
-- Touch-driven UI now that real X/Y coordinates exist (see
-  [Touch calibration](#touch-calibration)): a WiFi-setup keyboard, or a
-  settings screen to pick a different city without recompiling, instead of the
-  current single "tap anywhere" gesture. A settings-menu entry point to
-  discover/trigger re-calibration also still needs to exist (the gesture works,
-  but nothing surfaces it).
+- A settings screen to pick a different city without recompiling (the
+  touch-driven WiFi-setup keyboard and the recalibration menu entry now exist —
+  see [Configuration](#configuration-wifi-credentials) and
+  [Touch calibration](#touch-calibration)).
+- Multiple saved WiFi networks / automatic network switching (today it's a
+  single stored credential — "forget and re-enter" via **Settings → WiFi**).
 - Actual backlight dimming control (a schedule, an ambient light sensor, or
   just a manually-set day/night level) — the PWM plumbing is already there,
   it's just fixed at `BACKLIGHT_DUTY_PERCENT`.
