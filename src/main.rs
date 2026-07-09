@@ -1,6 +1,7 @@
 mod cache;
 mod framebuf;
 mod prayer;
+mod rgb_led;
 mod segdisplay;
 mod settings;
 mod settings_screen;
@@ -45,6 +46,7 @@ use mipidsi::{
 };
 
 use namaz_vakti_logic::language::{self, Language, Msg};
+use namaz_vakti_logic::zone::Zone;
 
 use framebuf::FrameBuf;
 use prayer::DayTimes;
@@ -140,17 +142,16 @@ fn col_zone_kerahet() -> Rgb565 {
     Rgb565::new(28, 15, 7)
 }
 
-/// The progress-bar zone color for a given elapsed fraction — the same three
-/// static thirds the bar is divided into (Fazilet / Cevaz / Kerahet). Used to
-/// tint the *current* prayer box so it matches the zone the countdown is in.
-fn zone_color(progress: f32) -> Rgb565 {
-    let p = progress.clamp(0.0, 1.0);
-    if p < 1.0 / 3.0 {
-        col_zone_fazilet()
-    } else if p < 2.0 / 3.0 {
-        col_zone_cevaz()
-    } else {
-        col_zone_kerahet()
+/// The status-bar color for a fıkh [`Zone`] — the on-screen half of the shared
+/// zone mapping. Used to tint the *current* prayer box so it matches the zone
+/// the countdown is in; the RGB status LED derives its own pattern from the same
+/// [`Zone`] (see [`rgb_led`]), so screen and LED can never drift. The zone
+/// thresholds themselves live once in [`Zone::from_progress`].
+fn zone_display_color(zone: Zone) -> Rgb565 {
+    match zone {
+        Zone::Fazilet => col_zone_fazilet(),
+        Zone::Cevaz => col_zone_cevaz(),
+        Zone::Kerahet => col_zone_kerahet(),
     }
 }
 
@@ -190,6 +191,16 @@ fn main() -> anyhow::Result<()> {
         peripherals.pins.gpio27,
     )?;
     backlight.set_duty(backlight.get_max_duty() * BACKLIGHT_DUTY_PERCENT / 100)?;
+
+    // --- Onboard RGB status LED (issue #17) ---
+    // Common-anode tricolor LED on GPIO 22/16/17; the driver hides the
+    // active-low inversion and mirrors the dashboard's fıkh-zone status color.
+    // Starts off until the first countdown tick resolves a zone.
+    let mut rgb_led = rgb_led::RgbLed::new(
+        peripherals.pins.gpio22, // Red
+        peripherals.pins.gpio16, // Green
+        peripherals.pins.gpio17, // Blue
+    )?;
 
     // --- Display + touch (ST7796S + XPT2046, sharing SPI2/HSPI; pin map
     // reverse-engineered from the board's C/ESP-IDF/LVGL project, see
@@ -537,6 +548,10 @@ fn main() -> anyhow::Result<()> {
                     &[language::text(settings.language, Msg::PrayerDataMissing)],
                     settings.language,
                 )?;
+                // No active zone while data is missing → LED off (non-fatal).
+                if let Err(e) = rgb_led.set_zone(None) {
+                    log::warn!("RGB LED update failed: {e:?}");
+                }
                 frame_state = None; // force a full repaint once data is back
                 continue;
             };
@@ -570,7 +585,19 @@ fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
-            let current_color = progress.map(zone_color);
+            // Resolve the active fıkh zone once, then derive both the on-screen
+            // tint and the LED pattern from it (single source of truth). `None`
+            // before the day's first entry → no tint and LED off.
+            let current_zone = progress.map(Zone::from_progress);
+            let current_color = current_zone.map(zone_display_color);
+
+            // Mirror the current-vakit zone on the onboard RGB LED. The driver
+            // gates on change, so this is a no-op except at 33%/66% crossings
+            // and prayer transitions. An LED write error is logged and ignored
+            // so a GPIO hiccup can never stall the dashboard.
+            if let Err(e) = rgb_led.set_zone(current_zone) {
+                log::warn!("RGB LED update failed: {e:?}");
+            }
 
             let day_changed = frame_state
                 .as_ref()
