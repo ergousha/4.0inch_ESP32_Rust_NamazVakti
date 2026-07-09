@@ -1,4 +1,5 @@
 mod cache;
+mod framebuf;
 mod prayer;
 mod segdisplay;
 mod settings;
@@ -45,6 +46,7 @@ use mipidsi::{
 
 use namaz_vakti_logic::language::{self, Language, Msg};
 
+use framebuf::FrameBuf;
 use prayer::DayTimes;
 use time_utils::LocalTime;
 use touch::Xpt2046;
@@ -106,6 +108,16 @@ fn col_dim() -> Rgb565 {
 fn col_card_bg() -> Rgb565 {
     Rgb565::new(2, 5, 7)
 }
+
+// Big seven-segment countdown geometry ("HH:MM:SS"). Sized so all 8 glyphs fit
+// within the 480px panel with margins; a RAM framebuffer of `CD_BOX_W` x
+// `CD_DIGIT_H` (see [`framebuf::FrameBuf`]) backs it so the whole box flushes in
+// one SPI transfer, cheap enough to repaint every second.
+const CD_DIGIT_W: u32 = 42;
+const CD_DIGIT_H: u32 = 80;
+const CD_THICK: u32 = 10;
+const CD_GAP: u32 = 10;
+const CD_DIGITS_Y: i32 = 74;
 
 fn main() -> anyhow::Result<()> {
     esp_idf_svc::sys::link_patches();
@@ -350,9 +362,18 @@ fn main() -> anyhow::Result<()> {
     // small regions that actually changed instead of the whole panel (a full
     // 480x320 clear+redraw took 100-200ms and was visibly flickering).
     let mut frame_state: Option<FrameState> = None;
-    // The dashboard only shows minute resolution, so it only needs to
-    // repaint once a minute rather than every second.
+    // The header line (wall clock at minute resolution, date, weekday) and the
+    // "next vakit" label only change once a minute, so they're gated on the
+    // minute to avoid needlessly repainting text every second.
     let mut last_drawn_minute: Option<i64> = None;
+    // The big countdown + progress bar tick every second. Rendering goes through
+    // `clock_fb` (a RAM framebuffer flushed in one SPI transfer), which is what
+    // makes second-resolution updates fast and flicker-free.
+    let mut last_drawn_second: Option<i64> = None;
+    // Sized to the widest countdown string so the buffer width matches exactly
+    // what `draw_big_time` renders (used for centering at flush time).
+    let clock_box_w = segdisplay::measure_big_time("00:00:00", CD_DIGIT_W, CD_THICK, CD_GAP);
+    let mut clock_fb = FrameBuf::new(clock_box_w, CD_DIGIT_H, col_bg());
 
     // The header date mode now comes from persisted settings rather than a
     // tap gesture. `press_handled` de-bounces the gear tap so one finger-down
@@ -432,6 +453,7 @@ fn main() -> anyhow::Result<()> {
                         // Leaving settings (or a sub-flow) forces a full repaint.
                         frame_state = None;
                         last_drawn_minute = None;
+                        last_drawn_second = None;
                     }
                 }
             }
@@ -502,7 +524,9 @@ fn main() -> anyhow::Result<()> {
 
             if day_changed {
                 draw_static_frame(&mut display, today_row, next_today_label, settings.language)?;
-                last_drawn_minute = None; // force the clock/countdown to repaint too
+                // Force the header and clock/countdown to repaint too.
+                last_drawn_minute = None;
+                last_drawn_second = None;
             } else if frame_state.as_ref().unwrap().next_today_label != next_today_label {
                 update_card_highlight(
                     &mut display,
@@ -513,19 +537,25 @@ fn main() -> anyhow::Result<()> {
                 )?;
             }
 
+            // Header + next-vakit label: minute cadence (nothing here changes
+            // more often than once a minute).
             let current_minute = now_local_secs.div_euclid(60);
             if last_drawn_minute != Some(current_minute) {
-                draw_dynamic(
+                draw_header(
                     &mut display,
                     &local,
                     today_row,
                     settings.date_mode,
                     next_entry.label,
-                    remaining,
-                    progress,
                     settings.language,
                 )?;
                 last_drawn_minute = Some(current_minute);
+            }
+
+            // Big countdown + progress bar: second cadence via the framebuffer.
+            if last_drawn_second != Some(now_local_secs) {
+                draw_countdown(&mut display, &mut clock_fb, remaining, progress)?;
+                last_drawn_second = Some(now_local_secs);
             }
 
             frame_state = Some(FrameState {
@@ -987,21 +1017,17 @@ where
     Ok(())
 }
 
-/// Draws everything that changes over time: the header line (date/weekday/
-/// clock), the "next vakit" label, the big countdown, and the progress bar.
-/// Called once a minute (the dashboard only shows minute resolution), and
-/// each region clears only its own small bounding box first instead of the
-/// whole panel, which is what made the previous full-screen-every-second
-/// redraw visibly flicker.
-#[allow(clippy::too_many_arguments)]
-fn draw_dynamic<D>(
+/// Draws the minute-cadence dynamic regions: the header line (city/date/
+/// weekday/wall clock) and the "next vakit" label. Each region clears only its
+/// own small bounding box first instead of the whole panel, which is what made
+/// the previous full-screen redraw visibly flicker. The per-second countdown
+/// and progress bar are drawn separately by [`draw_countdown`].
+fn draw_header<D>(
     display: &mut D,
     local: &LocalTime,
     today: Option<&DayTimes>,
     date_mode: DateMode,
     next_label: &str,
-    remaining_secs: i64,
-    progress: Option<f32>,
     lang: Language,
 ) -> anyhow::Result<()>
 where
@@ -1081,30 +1107,51 @@ where
         text::Size::Medium,
     )?;
 
-    // Big countdown, minute resolution ("HH:MM" — seconds were removed since
-    // the display only repaints once a minute anyway).
-    let h = remaining_secs.max(0) / 3600;
-    let m = (remaining_secs.max(0) % 3600) / 60;
-    let countdown = format!("{h:02}:{m:02}");
-    let (digit_w, digit_h, thickness, gap) = (60u32, 110u32, 14u32, 16u32);
-    let width = segdisplay::measure_big_time(&countdown, digit_w, thickness, gap);
-    let start_x = 240 - (width as i32) / 2;
-    let digits_y = 70i32;
-    Rectangle::new(Point::new(start_x, digits_y), Size::new(width, digit_h))
-        .into_styled(PrimitiveStyle::with_fill(col_bg()))
-        .draw(display)
-        .map_err(|_| anyhow::anyhow!("draw error"))?;
+    Ok(())
+}
+
+/// Draws the per-second dynamic regions: the big seven-segment countdown
+/// ("HH:MM:SS") and the progress bar.
+///
+/// The countdown is rendered into `fb` (a RAM framebuffer) and flushed to the
+/// panel in a single SPI transfer. Batching the per-segment rectangle draws
+/// behind that buffer is what lets this run every second without the lag or
+/// flicker a live clear-then-redraw of the clock box would cause — so unlike
+/// the old minute-resolution display, seconds are now shown.
+fn draw_countdown<D>(
+    display: &mut D,
+    fb: &mut FrameBuf,
+    remaining_secs: i64,
+    progress: Option<f32>,
+) -> anyhow::Result<()>
+where
+    D: DrawTarget<Color = Rgb565>,
+{
+    let total = remaining_secs.max(0);
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    let s = total % 60;
+    let countdown = format!("{h:02}:{m:02}:{s:02}");
+
+    // Render the seven-segment glyphs into the RAM framebuffer (no SPI traffic),
+    // clearing last frame's segments first, then push the whole clock box to the
+    // panel in one batched transfer. Drawing is in buffer-local coordinates, so
+    // the digits start at x=0 and the buffer's width equals the drawn width.
+    fb.clear_fill(col_bg());
     segdisplay::draw_big_time(
-        display,
-        Point::new(start_x, digits_y),
-        digit_w,
-        digit_h,
-        thickness,
-        gap,
+        fb,
+        Point::new(0, 0),
+        CD_DIGIT_W,
+        CD_DIGIT_H,
+        CD_THICK,
+        CD_GAP,
         &countdown,
         col_accent(),
     )
     .map_err(|_| anyhow::anyhow!("draw error"))?;
+    let start_x = 240 - (fb.width() as i32) / 2;
+    fb.flush(display, Point::new(start_x, CD_DIGITS_Y))
+        .map_err(|_| anyhow::anyhow!("draw error"))?;
 
     // Progress bar (elapsed fraction of the current inter-prayer interval)
     let bar_x = 40;
