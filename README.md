@@ -9,6 +9,11 @@ anywhere to toggle the header's date between Miladi (Gregorian) and Hijri.
 
 ![Dashboard preview](docs/dashboard-preview.png)
 
+Tapping the gear icon opens the settings screen — language, header date mode,
+and the WiFi / touch-calibration system actions:
+
+![Settings screen preview](docs/settings-preview.png)
+
 ## Hardware
 
 Board: **4.0 inch ESP32-32E Display** (also silkscreened as E32R40T /
