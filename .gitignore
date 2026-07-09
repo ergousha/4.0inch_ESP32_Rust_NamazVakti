@@ -5,3 +5,4 @@
 /cfg.toml
 /logic/target
 /logic/Cargo.lock
+.DS_Store
