@@ -21,7 +21,7 @@ use embedded_graphics::{
         MonoTextStyle,
     },
     prelude::*,
-    primitives::{PrimitiveStyle, PrimitiveStyleBuilder, Rectangle},
+    primitives::{PrimitiveStyle, PrimitiveStyleBuilder, Rectangle, StrokeAlignment},
     text::{Alignment, Text},
 };
 use embedded_svc::wifi::{AuthMethod, ClientConfiguration, Configuration as WifiConfiguration};
@@ -1122,6 +1122,7 @@ where
     let border_style = PrimitiveStyleBuilder::new()
         .stroke_color(border_color)
         .stroke_width(stroke_width)
+        .stroke_alignment(StrokeAlignment::Inside)
         .fill_color(col_bg())
         .build();
     Rectangle::new(Point::new(x, CARD_Y), Size::new(CARD_W, CARD_H))
