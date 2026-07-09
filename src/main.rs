@@ -90,23 +90,68 @@ impl DateMode {
 
 type Rgb565 = embedded_graphics::pixelcolor::Rgb565;
 
+// Pixel-art palette (issue #15). Hex values are converted to RGB565 with the
+// standard truncation (R,B: hex >> 3; G: hex >> 2). The panel is configured for
+// BGR order at the MADCTL level, so `Rgb565::new(r, g, b)` still maps to logical
+// RGB here. Solid colors only — no gradients, no anti-aliasing.
+
+/// Background — Deep Night Navy `#0A1128`.
 fn col_bg() -> Rgb565 {
-    Rgb565::new(0, 2, 4)
+    Rgb565::new(1, 4, 5)
 }
+/// Primary active accent — Mustard Yellow `#ECC94B`.
 fn col_accent() -> Rgb565 {
-    Rgb565::new(31, 42, 0)
+    Rgb565::new(29, 50, 9)
 }
+/// Dark text drawn on top of a mustard fill (settings/wifi buttons). Uses the
+/// navy background so filled accent buttons read as inverted.
 fn col_accent_dark() -> Rgb565 {
-    Rgb565::new(2, 2, 0)
+    Rgb565::new(1, 4, 5)
 }
+/// Secondary active accent — Ice White `#E2E8F0`.
 fn col_text() -> Rgb565 {
-    Rgb565::new(27, 54, 27)
+    Rgb565::new(28, 58, 30)
 }
+/// Muted text / inactive borders — Ash Gray `#4A5568`.
 fn col_dim() -> Rgb565 {
-    Rgb565::new(9, 18, 9)
+    Rgb565::new(9, 21, 13)
 }
+/// Subtle card fill on the navy background (settings/wifi surfaces).
 fn col_card_bg() -> Rgb565 {
-    Rgb565::new(2, 5, 7)
+    Rgb565::new(2, 8, 7)
+}
+
+/// Progress-bar track for the consumed (elapsed) portion — a navy just barely
+/// lighter than the background (`#141C38`) so the full bar silhouette stays
+/// visible and the remaining colored slice doesn't read as detached.
+fn col_track() -> Rgb565 {
+    Rgb565::new(2, 7, 7)
+}
+/// Progress-bar zone: *Fazilet* time — Emerald Green `#48BB78`.
+fn col_zone_fazilet() -> Rgb565 {
+    Rgb565::new(9, 46, 15)
+}
+/// Progress-bar zone: *Cevaz* time — Warm Orange `#ED8936`.
+fn col_zone_cevaz() -> Rgb565 {
+    Rgb565::new(29, 34, 6)
+}
+/// Progress-bar zone: *Kerahet* time — Warning Red `#E53E3E`.
+fn col_zone_kerahet() -> Rgb565 {
+    Rgb565::new(28, 15, 7)
+}
+
+/// The progress-bar zone color for a given elapsed fraction — the same three
+/// static thirds the bar is divided into (Fazilet / Cevaz / Kerahet). Used to
+/// tint the *current* prayer box so it matches the zone the countdown is in.
+fn zone_color(progress: f32) -> Rgb565 {
+    let p = progress.clamp(0.0, 1.0);
+    if p < 1.0 / 3.0 {
+        col_zone_fazilet()
+    } else if p < 2.0 / 3.0 {
+        col_zone_cevaz()
+    } else {
+        col_zone_kerahet()
+    }
 }
 
 // Big seven-segment countdown geometry ("HH:MM:SS"). Sized so all 8 glyphs fit
@@ -516,6 +561,16 @@ fn main() -> anyhow::Result<()> {
             } else {
                 None
             };
+            // The vakit we're currently in is the timeline entry just before the
+            // next one; its box is tinted to the progress bar's active zone. Its
+            // label is always one of the five names, so it maps to a today box
+            // even when the "current" entry is yesterday's Yatsı.
+            let current_today_label = if idx > 0 {
+                Some(timeline[idx - 1].label)
+            } else {
+                None
+            };
+            let current_color = progress.map(zone_color);
 
             let day_changed = frame_state
                 .as_ref()
@@ -523,18 +578,35 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or(true);
 
             if day_changed {
-                draw_static_frame(&mut display, today_row, next_today_label, settings.language)?;
+                draw_static_frame(
+                    &mut display,
+                    today_row,
+                    next_today_label,
+                    current_today_label,
+                    current_color,
+                    settings.language,
+                )?;
                 // Force the header and clock/countdown to repaint too.
                 last_drawn_minute = None;
                 last_drawn_second = None;
-            } else if frame_state.as_ref().unwrap().next_today_label != next_today_label {
-                update_card_highlight(
-                    &mut display,
-                    today_row,
-                    frame_state.as_ref().unwrap().next_today_label,
-                    next_today_label,
-                    settings.language,
-                )?;
+            } else {
+                let prev = frame_state.as_ref().unwrap();
+                if prev.next_today_label != next_today_label
+                    || prev.current_today_label != current_today_label
+                    || prev.current_color != current_color
+                {
+                    update_cards(
+                        &mut display,
+                        today_row,
+                        prev.next_today_label,
+                        prev.current_today_label,
+                        prev.current_color,
+                        next_today_label,
+                        current_today_label,
+                        current_color,
+                        settings.language,
+                    )?;
+                }
             }
 
             // Header + next-vakit label: minute cadence (nothing here changes
@@ -561,6 +633,8 @@ fn main() -> anyhow::Result<()> {
             frame_state = Some(FrameState {
                 today_key,
                 next_today_label,
+                current_today_label,
+                current_color,
             });
         }
 
@@ -571,6 +645,8 @@ fn main() -> anyhow::Result<()> {
 struct FrameState {
     today_key: String,
     next_today_label: Option<&'static str>,
+    current_today_label: Option<&'static str>,
+    current_color: Option<Rgb565>,
 }
 
 fn now_epoch() -> i64 {
@@ -895,6 +971,36 @@ const CARD_W: u32 = 88;
 const CARD_H: u32 = 95;
 const CARD_Y: i32 = 210;
 
+/// Visual state of a footer vakit box.
+#[derive(Clone, Copy, PartialEq)]
+enum CardState {
+    /// Not the current or next prayer — Ash Gray border/label, Ice White time.
+    Inactive,
+    /// The upcoming prayer — 2px Mustard outline, Mustard label + time.
+    Next,
+    /// The vakit we're currently in — 2px outline + text tinted to the progress
+    /// bar's active zone color (Fazilet green / Cevaz orange / Kerahet red).
+    Current(Rgb565),
+}
+
+/// Resolves a box's [`CardState`] from the current next/current labels and the
+/// active zone color. `Next` takes precedence if a label somehow matches both.
+fn card_state_for(
+    name: &str,
+    next_label: Option<&str>,
+    current_label: Option<&str>,
+    current_color: Option<Rgb565>,
+) -> CardState {
+    if next_label == Some(name) {
+        CardState::Next
+    } else if current_label == Some(name) {
+        // No zone color (e.g. before the day's first entry) → stays inactive.
+        current_color.map_or(CardState::Inactive, CardState::Current)
+    } else {
+        CardState::Inactive
+    }
+}
+
 /// Draws everything that only changes once a day (or on the very first frame):
 /// the header separator line and all 5 vakit cards in their correct initial
 /// highlight state. This is the only place that clears the *whole* panel.
@@ -902,6 +1008,8 @@ fn draw_static_frame<D>(
     display: &mut D,
     today: Option<&DayTimes>,
     next_today_label: Option<&str>,
+    current_today_label: Option<&str>,
+    current_color: Option<Rgb565>,
     lang: Language,
 ) -> anyhow::Result<()>
 where
@@ -919,21 +1027,28 @@ where
     if let Some(today) = today {
         for i in 0..5 {
             let name = today.prayers()[i].0;
-            draw_card(display, today, i, next_today_label == Some(name), lang)?;
+            let state = card_state_for(name, next_today_label, current_today_label, current_color);
+            draw_card(display, today, i, state, lang)?;
         }
     }
 
     Ok(())
 }
 
-/// Redraws only the (at most two) cards whose highlight state changed since
-/// the last frame: the previously-highlighted one turns normal, the newly
-/// upcoming one turns highlighted.
-fn update_card_highlight<D>(
+/// Redraws only the cards whose [`CardState`] changed since the last frame —
+/// the previous next/current boxes reverting to inactive, the new ones taking
+/// their highlight, and the current box re-tinting when the countdown crosses a
+/// progress-bar zone boundary (green → orange → red).
+#[allow(clippy::too_many_arguments)]
+fn update_cards<D>(
     display: &mut D,
     today: Option<&DayTimes>,
-    old_label: Option<&str>,
-    new_label: Option<&str>,
+    old_next: Option<&str>,
+    old_current: Option<&str>,
+    old_color: Option<Rgb565>,
+    new_next: Option<&str>,
+    new_current: Option<&str>,
+    new_color: Option<Rgb565>,
     lang: Language,
 ) -> anyhow::Result<()>
 where
@@ -942,13 +1057,11 @@ where
     let Some(today) = today else {
         return Ok(());
     };
-    let prayers = today.prayers();
-    for (i, (name, _)) in prayers.iter().enumerate() {
-        if Some(*name) == old_label {
-            draw_card(display, today, i, false, lang)?;
-        }
-        if Some(*name) == new_label {
-            draw_card(display, today, i, true, lang)?;
+    for (i, (name, _)) in today.prayers().iter().enumerate() {
+        let old_state = card_state_for(name, old_next, old_current, old_color);
+        let new_state = card_state_for(name, new_next, new_current, new_color);
+        if old_state != new_state {
+            draw_card(display, today, i, new_state, lang)?;
         }
     }
     Ok(())
@@ -958,7 +1071,7 @@ fn draw_card<D>(
     display: &mut D,
     today: &DayTimes,
     index: usize,
-    highlighted: bool,
+    state: CardState,
     lang: Language,
 ) -> anyhow::Result<()>
 where
@@ -970,30 +1083,26 @@ where
     let name = language::prayer_names(lang)[index];
     let x = CARD_MARGIN + index as i32 * (CARD_W as i32 + CARD_GAP);
 
+    // Next/current boxes get a 2px outline; inactive a 1px one. None fill the
+    // interior (no solid background — avoids screen glare). Text color matches
+    // the border: Mustard for next, the zone color for current, and Ash Gray /
+    // Ice White (label / time) for inactive.
+    let (border_color, stroke_width, name_color, time_color) = match state {
+        CardState::Inactive => (col_dim(), 1, col_dim(), col_text()),
+        CardState::Next => (col_accent(), 2, col_accent(), col_accent()),
+        CardState::Current(c) => (c, 2, c, c),
+    };
     let border_style = PrimitiveStyleBuilder::new()
-        .stroke_color(if highlighted { col_accent() } else { col_dim() })
-        .stroke_width(1)
-        .fill_color(if highlighted {
-            col_accent()
-        } else {
-            col_card_bg()
-        })
+        .stroke_color(border_color)
+        .stroke_width(stroke_width)
+        .fill_color(col_bg())
         .build();
     Rectangle::new(Point::new(x, CARD_Y), Size::new(CARD_W, CARD_H))
         .into_styled(border_style)
         .draw(display)
         .map_err(|_| anyhow::anyhow!("draw error"))?;
 
-    let name_color = if highlighted {
-        col_accent_dark()
-    } else {
-        col_dim()
-    };
-    let time_style = if highlighted {
-        MonoTextStyle::new(&FONT_9X18_BOLD, col_accent_dark())
-    } else {
-        MonoTextStyle::new(&FONT_9X18_BOLD, col_text())
-    };
+    let time_style = MonoTextStyle::new(&FONT_9X18_BOLD, time_color);
 
     text::draw_line(
         display,
@@ -1053,7 +1162,7 @@ where
         Text::new(
             &latin,
             Point::new(10, 20),
-            MonoTextStyle::new(&FONT_9X15, col_text()),
+            MonoTextStyle::new(&FONT_9X15, col_dim()),
         )
         .draw(display)
         .map_err(|_| anyhow::anyhow!("draw error"))?;
@@ -1063,7 +1172,7 @@ where
             weekday,
             Point::new(438, 20),
             text::HAlign::Right,
-            col_text(),
+            col_dim(),
             lang,
             text::Size::Small,
         )?;
@@ -1078,7 +1187,7 @@ where
             &header_str,
             Point::new(10, 20),
             text::HAlign::Left,
-            col_text(),
+            col_dim(),
             lang,
             text::Size::Small,
         )?;
@@ -1146,29 +1255,53 @@ where
         CD_THICK,
         CD_GAP,
         &countdown,
-        col_accent(),
+        col_text(),
     )
     .map_err(|_| anyhow::anyhow!("draw error"))?;
     let start_x = 240 - (fb.width() as i32) / 2;
     fb.flush(display, Point::new(start_x, CD_DIGITS_Y))
         .map_err(|_| anyhow::anyhow!("draw error"))?;
 
-    // Progress bar (elapsed fraction of the current inter-prayer interval)
+    // Progress bar (Fıkh-driven remaining time). Three static, equal-width color
+    // zones from left to right — Fazilet (green), Cevaz (orange), Kerahet (red).
+    // As the interval elapses the bar erases from the left: consumed pixels
+    // revert to the background color, so only the *remaining* time stays colored.
     let bar_x = 40;
     let bar_y = 190;
     let bar_w = 400u32;
     let bar_h = 10u32;
-    Rectangle::new(Point::new(bar_x, bar_y), Size::new(bar_w, bar_h))
-        .into_styled(PrimitiveStyle::with_fill(col_dim()))
-        .draw(display)
-        .map_err(|_| anyhow::anyhow!("draw error"))?;
-    if let Some(p) = progress {
-        let filled = (p.clamp(0.0, 1.0) * bar_w as f32) as u32;
-        if filled > 0 {
-            Rectangle::new(Point::new(bar_x, bar_y), Size::new(filled, bar_h))
-                .into_styled(PrimitiveStyle::with_fill(col_accent()))
-                .draw(display)
-                .map_err(|_| anyhow::anyhow!("draw error"))?;
+    let zone_w = bar_w / 3;
+    // The last zone absorbs the rounding remainder so the zones span the full bar.
+    let zones = [
+        (bar_x, zone_w, col_zone_fazilet()),
+        (bar_x + zone_w as i32, zone_w, col_zone_cevaz()),
+        (bar_x + 2 * zone_w as i32, bar_w - 2 * zone_w, col_zone_kerahet()),
+    ];
+    let consumed = progress
+        .map(|p| (p.clamp(0.0, 1.0) * bar_w as f32) as u32)
+        .unwrap_or(0);
+    // Paint the consumed (elapsed) portion on the left with the faint track
+    // color, so the whole bar's silhouette stays visible instead of blending
+    // into the background.
+    if consumed > 0 {
+        Rectangle::new(Point::new(bar_x, bar_y), Size::new(consumed, bar_h))
+            .into_styled(PrimitiveStyle::with_fill(col_track()))
+            .draw(display)
+            .map_err(|_| anyhow::anyhow!("draw error"))?;
+    }
+    // Paint the visible slice of each zone that lies past the erased region.
+    let fill_start = bar_x + consumed as i32;
+    for (zx, zw, color) in zones {
+        let zone_end = zx + zw as i32;
+        let vis_start = zx.max(fill_start);
+        if vis_start < zone_end {
+            Rectangle::new(
+                Point::new(vis_start, bar_y),
+                Size::new((zone_end - vis_start) as u32, bar_h),
+            )
+            .into_styled(PrimitiveStyle::with_fill(color))
+            .draw(display)
+            .map_err(|_| anyhow::anyhow!("draw error"))?;
         }
     }
 
