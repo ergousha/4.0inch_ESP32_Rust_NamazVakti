@@ -1,5 +1,9 @@
-# Rust often needs a bit of an extra main task stack size compared to C (the default is 3K)
-CONFIG_ESP_MAIN_TASK_STACK_SIZE=10240
+# Rust often needs a bit of an extra main task stack size compared to C (the default is 3K).
+# Raised to 32K (issue #21): the on-device location flow runs the HTTPS list
+# fetches several call-frames deep inside the settings UI, and the mbedTLS
+# handshake's stack spike overflowed the previous 10K main-task stack (the boot
+# fetch survived only because it runs at a much shallower call depth).
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=32768
 
 # Increase a bit these stack sizes as they are also a bit too small by default
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096

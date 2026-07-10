@@ -1,5 +1,9 @@
+mod about;
 mod cache;
 mod framebuf;
+mod keyboard;
+mod location;
+mod location_setup;
 mod prayer;
 mod rgb_led;
 mod segdisplay;
@@ -318,6 +322,13 @@ fn main() -> anyhow::Result<()> {
     let mut days_data = cache::load(&cache_nvs);
     let have_cache = !days_data.is_empty();
 
+    // --- Persisted prayer-time location (issue #21) ---
+    // The district id here is the `/vakitler/{id}` key for every fetch; a fresh
+    // device with nothing stored defaults to Haarlem (the historical location).
+    let location_nvs = location::open(nvs.clone())?;
+    let mut selected_location = location::load(&location_nvs);
+    log::info!("Loaded location: {selected_location:?}");
+
     // --- WiFi credentials + connection ---
     // Credentials live in NVS now (set on-device via the setup flow below),
     // replacing the compile-time cfg.toml values. cfg.toml, if present, only
@@ -386,7 +397,12 @@ fn main() -> anyhow::Result<()> {
         // status screen, and let the main loop's throttled refresh path keep
         // retrying (DNS/API outages, TLS failures and captive WiFi are all
         // recoverable without a reboot).
-        match fetch_with_retry(&mut display, 5, settings.language) {
+        match fetch_with_retry(
+            &mut display,
+            5,
+            settings.language,
+            &selected_location.district_id,
+        ) {
             Ok(fresh) => {
                 cache::save(&cache_nvs, &fresh);
                 days_data = fresh;
@@ -505,6 +521,85 @@ fn main() -> anyhow::Result<()> {
                                 }
                                 calibration = outcome.calibration();
                             }
+                            SettingsExit::About => {
+                                // The MAC comes from the station interface; a
+                                // read error just shows a placeholder rather
+                                // than aborting the page.
+                                let mac = wifi
+                                    .wifi()
+                                    .sta_netif()
+                                    .get_mac()
+                                    .map(|m| {
+                                        format!(
+                                            "{:02X}:{:02X}:{:02X}:{:02X}:{:02X}:{:02X}",
+                                            m[0], m[1], m[2], m[3], m[4], m[5]
+                                        )
+                                    })
+                                    .unwrap_or_else(|e| {
+                                        log::warn!("Failed to read station MAC: {e:?}");
+                                        "--:--:--:--:--:--".to_string()
+                                    });
+                                about::run(
+                                    &mut display,
+                                    &mut touch,
+                                    &calibration,
+                                    settings.language,
+                                    &mac,
+                                )?;
+                            }
+                            SettingsExit::Location => {
+                                // Search + pick a new location. On a confirmed
+                                // selection, persist it and refresh the cached
+                                // prayer times; a failed refresh keeps the prior
+                                // cache so the dashboard never goes blank.
+                                if let Some(new_sel) = location_setup::run_setup(
+                                    &mut display,
+                                    &mut touch,
+                                    &calibration,
+                                    settings.language,
+                                )? {
+                                    location::save(&location_nvs, &new_sel);
+                                    selected_location = new_sel;
+                                    let _ = draw_status(
+                                        &mut display,
+                                        &[language::text(
+                                            settings.language,
+                                            Msg::LocationSaving,
+                                        )],
+                                        settings.language,
+                                    );
+                                    match prayer::fetch_month(&selected_location.district_id) {
+                                        Ok(fresh) => {
+                                            cache::save(&cache_nvs, &fresh);
+                                            days_data = fresh;
+                                            last_fetch_attempt = now_epoch();
+                                            let _ = draw_status(
+                                                &mut display,
+                                                &[language::text(
+                                                    settings.language,
+                                                    Msg::LocationSaved,
+                                                )],
+                                                settings.language,
+                                            );
+                                            std::thread::sleep(Duration::from_millis(1200));
+                                        }
+                                        Err(e) => {
+                                            log::warn!(
+                                                "Prayer fetch for new location failed, keeping cache: {e:?}"
+                                            );
+                                            let _ = draw_status(
+                                                &mut display,
+                                                &[language::text(
+                                                    settings.language,
+                                                    Msg::PrayerFetchFailed,
+                                                )],
+                                                settings.language,
+                                            );
+                                            std::thread::sleep(Duration::from_secs(2));
+                                        }
+                                    }
+                                }
+                            }
                         }
                         // Leaving settings (or a sub-flow) forces a full repaint.
                         frame_state = None;
@@ -527,7 +622,7 @@ fn main() -> anyhow::Result<()> {
             let need_refresh = !days_data.iter().any(|d| d.date == today_key);
             if need_refresh && epoch - last_fetch_attempt >= 300 {
                 last_fetch_attempt = epoch;
-                match prayer::fetch_month() {
+                match prayer::fetch_month(&selected_location.district_id) {
                     Ok(fresh) => {
                         log::info!("Prayer data refreshed ({} days)", fresh.len());
                         cache::save(&cache_nvs, &fresh);
@@ -646,6 +741,7 @@ fn main() -> anyhow::Result<()> {
                     today_row,
                     settings.date_mode,
                     next_entry.label,
+                    &selected_location.header_label(),
                     settings.language,
                 )?;
                 last_drawn_minute = Some(current_minute);
@@ -718,13 +814,14 @@ fn fetch_with_retry<D>(
     display: &mut D,
     attempts: u32,
     lang: Language,
+    district_id: &str,
 ) -> anyhow::Result<Vec<DayTimes>>
 where
     D: DrawTarget<Color = Rgb565>,
 {
     let mut last_err = None;
     for attempt in 1..=attempts {
-        match prayer::fetch_month() {
+        match prayer::fetch_month(district_id) {
             Ok(days) => return Ok(days),
             Err(e) => {
                 log::warn!("Fetch attempt {attempt}/{attempts} failed: {e:?}");
@@ -911,6 +1008,8 @@ enum SettingsExit {
     Back,
     Wifi,
     Recalibrate,
+    About,
+    Location,
 }
 
 /// Shows the settings screen and processes taps until the user leaves it.
@@ -947,6 +1046,10 @@ where
                         Some(settings_screen::Hit::Wifi) => return Ok(SettingsExit::Wifi),
                         Some(settings_screen::Hit::Recalibrate) => {
                             return Ok(SettingsExit::Recalibrate)
+                        }
+                        Some(settings_screen::Hit::About) => return Ok(SettingsExit::About),
+                        Some(settings_screen::Hit::Location) => {
+                            return Ok(SettingsExit::Location)
                         }
                         Some(settings_screen::Hit::Language(l)) => {
                             settings.language = l;
@@ -1159,12 +1262,14 @@ where
 /// own small bounding box first instead of the whole panel, which is what made
 /// the previous full-screen redraw visibly flicker. The per-second countdown
 /// and progress bar are drawn separately by [`draw_countdown`].
+#[allow(clippy::too_many_arguments)]
 fn draw_header<D>(
     display: &mut D,
     local: &LocalTime,
     today: Option<&DayTimes>,
     date_mode: DateMode,
     next_label: &str,
+    city: &str,
     lang: Language,
 ) -> anyhow::Result<()>
 where
@@ -1184,7 +1289,7 @@ where
         // (reversing digits would corrupt them) and render the Arabic weekday
         // on the right, shaped, before the gear icon.
         let latin = format!(
-            "HAARLEM   {date_part}   {:02}:{:02}",
+            "{city}   {date_part}   {:02}:{:02}",
             local.hour, local.minute
         );
         Text::new(
@@ -1207,7 +1312,7 @@ where
     } else {
         let weekday = localize_weekday(local.weekday_name(), lang);
         let header_str = format!(
-            "HAARLEM   {date_part}   {weekday}   {:02}:{:02}",
+            "{city}   {date_part}   {weekday}   {:02}:{:02}",
             local.hour, local.minute
         );
         text::draw_line(

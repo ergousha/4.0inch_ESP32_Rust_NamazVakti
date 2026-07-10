@@ -107,12 +107,15 @@ fn box_x(col: i32) -> i32 {
     BOX_X0 + col * (BOX_W as i32 + BOX_GAP)
 }
 
-// --- System row: two wide action buttons (WiFi setup, touch recalibration) ---
-// These are actions, not toggles, so they get their own wider geometry — their
-// labels don't fit the 110px option boxes above.
+// --- System row: four action buttons (WiFi, touch recalibration, About,
+// Location) ---
+// These are actions, not toggles. With four of them on the 480px panel they
+// share the same 110px width as the option boxes above (four columns fit
+// edge-to-edge: 8 + 4*110 + 3*8 = 472), so their labels are kept short (the
+// recalibrate label is abbreviated to fit — see `Msg::RecalibrateTouch`).
 const SYS_ROW_Y: i32 = 258;
-const SYS_BOX_W: u32 = 228;
-const SYS_BOX_GAP: i32 = 8;
+const SYS_BOX_W: u32 = BOX_W;
+const SYS_BOX_GAP: i32 = BOX_GAP;
 
 fn sys_box_x(col: i32) -> i32 {
     BOX_X0 + col * (SYS_BOX_W as i32 + SYS_BOX_GAP)
@@ -130,6 +133,10 @@ pub enum Hit {
     Wifi,
     /// Re-run the touch-calibration wizard.
     Recalibrate,
+    /// Open the About page (hardware/firmware/MAC).
+    About,
+    /// Open the location selection flow.
+    Location,
 }
 
 /// Maps a calibrated tap to the settings control under it, if any.
@@ -152,6 +159,12 @@ pub fn hit_test(x: i32, y: i32) -> Option<Hit> {
     }
     if in_sys_box(x, y, sys_box_x(1)) {
         return Some(Hit::Recalibrate);
+    }
+    if in_sys_box(x, y, sys_box_x(2)) {
+        return Some(Hit::About);
+    }
+    if in_sys_box(x, y, sys_box_x(3)) {
+        return Some(Hit::Location);
     }
     None
 }
@@ -265,6 +278,18 @@ where
         display,
         sys_box_x(1),
         language::text(lang, Msg::RecalibrateTouch),
+        lang,
+    )?;
+    draw_action(
+        display,
+        sys_box_x(2),
+        language::text(lang, Msg::AboutMenu),
+        lang,
+    )?;
+    draw_action(
+        display,
+        sys_box_x(3),
+        language::text(lang, Msg::LocationMenu),
         lang,
     )?;
 

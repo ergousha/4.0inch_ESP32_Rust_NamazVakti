@@ -2,17 +2,27 @@
 
 A `no_std`-free (std, ESP-IDF-based) Rust firmware for a 4.0" ESP32 TFT board
 that connects to WiFi, syncs the clock over NTP, downloads the month's prayer
-times for **Haarlem, Netherlands** from the [ezanvakti.emushaf.net](https://ezanvakti.emushaf.net/)
-API, and shows a full-screen dashboard: the 5 daily vakits, the currently
-upcoming one highlighted, and a live countdown until it. Tap the touchscreen
-anywhere to toggle the header's date between Miladi (Gregorian) and Hijri.
+times from the [ezanvakti.emushaf.net](https://ezanvakti.emushaf.net/) API for
+an on-device, searchable country/city/district selection (Haarlem,
+Netherlands by default), and shows a full-screen dashboard: the 5 daily
+vakits, the currently upcoming one highlighted, and a live countdown until it.
+Tap the touchscreen anywhere to toggle the header's date between Miladi
+(Gregorian) and Hijri.
 
 ![Dashboard preview](docs/dashboard-preview.png)
 
 Tapping the gear icon opens the settings screen — language, header date mode,
-and the WiFi / touch-calibration system actions:
+and the WiFi / touch-calibration / About / Location system actions:
 
 ![Settings screen preview](docs/settings-preview.png)
+
+The System actions each open their own touch-driven page, returning to
+Settings via the top-right back arrow. Location, for instance, walks through a
+typed search at each level of the API hierarchy — country, then city, then
+(where the city itself isn't specific enough) district — using the same
+on-screen keyboard as WiFi setup:
+
+![Location search preview](docs/location-search-preview.png)
 
 ## Hardware
 
@@ -139,19 +149,25 @@ Turkish Diyanet prayer times API, HTTPS, no API key needed. Endpoints:
 | `GET /ilceler/{sehirId}` | districts in a city/region |
 | `GET /vakitler/{ilceId}` | ~32 days of prayer times for a district |
 
-IDs resolved once for this project and hardcoded in [`src/prayer.rs`](src/prayer.rs)
-(`ILCE_ID`): **Hollanda** (Netherlands) → `UlkeID=4` → **Sehir "HOLLANDA"**
-(the API lumps all of NL under one pseudo-city) → `SehirID=721` →
-**Haarlem** → `IlceID=13877`. To retarget another city, re-run the same
-`/ulkeler` → `/sehirler` → `/ilceler` chain and swap `ILCE_ID`.
+The district id (`ilceId`) is resolved on-device through the Settings →
+Location page (see [`src/location_setup.rs`](src/location_setup.rs)): a typed
+search at each level narrows the country list, then the city list, then the
+district list, rather than rendering the full (often thousand-plus-row) API
+response on a resistive-touch panel. Some countries — the Netherlands among
+them — expose the whole country as a single pseudo-city (`UlkeID=4` →
+`SehirID=721`, named "HOLLANDA") with the real towns one level deeper as
+districts, so **Haarlem** is picked at the *district* step
+(`IlceID=13877`), not the city step. The confirmed selection (ids + display
+names) is persisted to NVS via [`src/location.rs`](src/location.rs) and
+defaults to that same Haarlem district on a fresh device.
 
 The firmware caches the fetched month to NVS flash (see "NVS caching of
-prayer data" under [Software architecture](#software-architecture) below),
-so `/vakitler/13877` is only actually fetched over HTTPS on the very first
-boot, or whenever today's
-date falls outside the cached ~32-day range (checked every second, throttled
-to one attempt per 5 minutes) — in practice about once a month. Of each
-day's JSON object, only these fields are used:
+prayer data" under [Software architecture](#software-architecture) below), so
+`/vakitler/{ilceId}` is only actually fetched over HTTPS right after a location
+change, on the very first boot, or whenever today's date falls outside the
+cached ~32-day range (checked every second, throttled to one attempt per 5
+minutes) — in practice about once a month. Of each day's JSON object, only
+these fields are used:
 
 - `MiladiTarihKisa` — Gregorian date, `"DD.MM.YYYY"`, used to find "today"'s
   row and shown in the header by default
@@ -181,12 +197,17 @@ this outside the EU, that's the function to replace.
 ```
 src/
 ├── main.rs        WiFi/SNTP/display/touch/backlight bring-up, main loop, all drawing code
-├── prayer.rs       HTTPS fetch + JSON model for the ezanvakti API
+├── settings_screen.rs  Settings screen: language/date options + the 4 System actions
+├── keyboard.rs     Shared on-screen keyboard + text-entry screen (WiFi + Location)
+├── about.rs        About page: hardware model, firmware version, station MAC
+├── location.rs     NVS load/save for the selected location + the Ezan Vakti list fetches
+├── location_setup.rs  Touch-driven location picker: country/city/district typed search
+├── prayer.rs       HTTPS fetch + JSON model for the ezanvakti API (parameterized by district id)
 ├── cache.rs        NVS load/save for the fetched prayer-time month
 ├── touch.rs        XPT2046 touch driver (pressure + raw X/Y coordinates)
 ├── touch_calibration.rs  NVS persistence + 5-point calibration wizard + gesture
 ├── wifi_credentials.rs   NVS load/save for the on-device WiFi credentials
-├── wifi_setup.rs   Touch-driven WiFi provisioning: scan picker + on-screen keyboard
+├── wifi_setup.rs   Touch-driven WiFi provisioning: scan picker + the shared on-screen keyboard
 ├── time_utils.rs   Calendar math + Europe/Amsterdam DST offset (no libc)
 └── segdisplay.rs    Seven-segment-style big digit renderer (embedded-graphics
                       primitives), used for the countdown clock

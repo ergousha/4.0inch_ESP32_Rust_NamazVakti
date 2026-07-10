@@ -11,6 +11,8 @@ description = "Pure, hardware-free calendar/prayer-time logic for namaz-vakti, k
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-
-[dev-dependencies]
+# Used by `location.rs` to parse the Ezan Vakti list endpoints; also drives the
+# serde_json-backed tests in this crate. A regular (not dev-only) dependency
+# because `location::parse_entries` exposes `serde_json::Error` in its public
+# signature.
 serde_json = "1"
