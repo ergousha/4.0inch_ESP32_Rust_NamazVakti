@@ -13,7 +13,7 @@ Thank you for your interest in contributing to this project! Here's how to get s
 1. Clone the repository:
    ```bash
    git clone <repository-url>
-   cd 4.0inch_ESP32_Rust_NamazVakti
+   cd esp32-display-vaktus-salat-rust
    ```
 
 2. Set up the environment:
